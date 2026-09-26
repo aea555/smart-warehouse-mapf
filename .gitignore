@@ -18,3 +18,6 @@ results/
 # Test/arac cachei
 .pytest_cache/
 .ruff_cache/
+
+# VS Code calisma alani (kisisel ayar)
+*.code-workspace
