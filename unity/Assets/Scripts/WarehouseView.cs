@@ -2,7 +2,8 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-// scene.json'daki depo haritasını ve yolu çizer, robotu yol boyunca yürütür.
+// scene.json'dan rastgele bir senaryo seçip çizer, robotu yol boyunca yürütür.
+// "Yeni görev" başka bir senaryoya geçer.
 //
 // Yolu A* Python tarafında buluyor (src/warehouse_mapf/astar.py). Unity sadece çizer.
 //
@@ -16,12 +17,16 @@ public class WarehouseView : MonoBehaviour
     private static readonly Color Background = new Color(0.07f, 0.08f, 0.10f);
     private static readonly Color Floor      = new Color(0.17f, 0.19f, 0.23f);
     private static readonly Color Shelf      = new Color(0.72f, 0.47f, 0.22f);
+    private static readonly Color Obstacle   = new Color(0.62f, 0.26f, 0.28f);
     private static readonly Color PathDot    = new Color(0.30f, 0.85f, 0.85f);
     private static readonly Color StartColor = new Color(0.35f, 0.80f, 0.40f);
     private static readonly Color GoalColor  = new Color(0.98f, 0.80f, 0.25f);
     private static readonly Color RobotColor = new Color(0.30f, 0.62f, 1.00f);
 
-    private SceneData data;
+    private ScenarioSet set;
+    private Scenario data;
+    private int current = -1;
+    private Transform world;
     private Sprite square;
     private Sprite circle;
     private Material spriteMaterial;
@@ -46,9 +51,7 @@ public class WarehouseView : MonoBehaviour
         if (unlit != null) spriteMaterial = new Material(unlit);
 
         if (!Load()) return;
-        Build();
-        FitCamera();
-        ResetRun();
+        NewTask();
     }
 
     private bool Load()
@@ -59,44 +62,69 @@ public class WarehouseView : MonoBehaviour
             loadError = "scene.json bulunamadi. Once: uv run python tools/export_scene.py";
             return false;
         }
-        data = JsonUtility.FromJson<SceneData>(File.ReadAllText(file));
+        set = JsonUtility.FromJson<ScenarioSet>(File.ReadAllText(file));
+        if (set.scenarios == null || set.scenarios.Length == 0)
+        {
+            loadError = "scene.json icinde senaryo yok.";
+            return false;
+        }
         return true;
+    }
+
+    // şu ankinden farklı rastgele bir senaryo
+    public void NewTask()
+    {
+        int next = Random.Range(0, set.scenarios.Length);
+        if (set.scenarios.Length > 1)
+            while (next == current) next = Random.Range(0, set.scenarios.Length);
+        current = next;
+        data = set.scenarios[current];
+
+        if (world != null) Destroy(world.gameObject);
+        world = new GameObject("World").transform;
+        Build();
+        FitCamera();
+        ResetRun();
     }
 
     private static Vector3 World(int x, int y) => new Vector3(x, -y, 0f);
 
     private void Build()
     {
-        var blocked = new HashSet<Vector2Int>();
-        foreach (var c in data.blocked) blocked.Add(new Vector2Int(c.x, c.y));
+        var shelves = new HashSet<Vector2Int>();
+        foreach (var c in data.shelves) shelves.Add(new Vector2Int(c.x, c.y));
+        var obstacles = new HashSet<Vector2Int>();
+        foreach (var c in data.obstacles) obstacles.Add(new Vector2Int(c.x, c.y));
 
         var gridRoot = new GameObject("Grid").transform;
+        gridRoot.SetParent(world, false);
         for (int y = 0; y < data.height; y++)
         for (int x = 0; x < data.width; x++)
         {
-            bool isShelf = blocked.Contains(new Vector2Int(x, y));
-            Spawn(isShelf ? "Shelf" : "Floor", square, World(x, y),
-                  isShelf ? Shelf : Floor, isShelf ? 0.90f : 0.94f, 0, gridRoot);
+            var cell = new Vector2Int(x, y);
+            Spawn("Floor", square, World(x, y), Floor, 0.94f, 0, gridRoot);
+            if (shelves.Contains(cell))
+                Spawn("Shelf", square, World(x, y), Shelf, 0.90f, 1, gridRoot);
+            else if (obstacles.Contains(cell))
+                Spawn("Obstacle", square, World(x, y), Obstacle, 0.62f, 1, gridRoot);
         }
 
         var pathRoot = new GameObject("Path").transform;
+        pathRoot.SetParent(world, false);
         var points = new List<Vector3>();
-        if (data.hasPath)
+        foreach (var c in data.path)
         {
-            foreach (var c in data.path)
-            {
-                Vector3 p = World(c.x, c.y);
-                points.Add(p);
-                Spawn("PathDot", circle, p, PathDot, 0.26f, 2, pathRoot);
-            }
+            Vector3 p = World(c.x, c.y);
+            points.Add(p);
+            Spawn("PathDot", circle, p, PathDot, 0.26f, 2, pathRoot);
         }
         waypoints = points.ToArray();
 
-        Spawn("Start", square, World(data.start.x, data.start.y), StartColor, 0.72f, 3, null);
-        var goal = Spawn("Goal", square, World(data.goal.x, data.goal.y), GoalColor, 0.58f, 3, null);
+        Spawn("Start", square, World(data.start.x, data.start.y), StartColor, 0.72f, 3, world);
+        var goal = Spawn("Goal", square, World(data.goal.x, data.goal.y), GoalColor, 0.58f, 3, world);
         goal.transform.rotation = Quaternion.Euler(0f, 0f, 45f);   // elmas gibi dursun
 
-        robot = Spawn("Robot", circle, World(data.start.x, data.start.y), RobotColor, 0.72f, 5, null).transform;
+        robot = Spawn("Robot", circle, World(data.start.x, data.start.y), RobotColor, 0.72f, 5, world).transform;
     }
 
     private GameObject Spawn(string name, Sprite sprite, Vector3 pos, Color color,
@@ -198,17 +226,16 @@ public class WarehouseView : MonoBehaviour
 
         int total = Mathf.Max(0, waypoints.Length - 1);
         int done = Mathf.FloorToInt(progress + 0.0001f);
-        string state = !data.hasPath ? "Yol yok"
-                     : done >= total ? "Hedefte"
+        string state = done >= total ? "Hedefte"
                      : playing ? "Hareket ediyor" : "Bekliyor";
 
         GUILayout.BeginArea(new Rect(0, 0, w, 84), panelStyle);
         GUILayout.BeginHorizontal();
 
-        GUILayout.BeginVertical(GUILayout.Width(360));
+        GUILayout.BeginVertical(GUILayout.Width(640));
         GUILayout.Label("Smart Warehouse — A* (tek robot)", titleStyle);
         GUILayout.Space(6);
-        GUILayout.Label($"Yol: {waypoints.Length} hücre, {total} adım   |   Robot: {done}/{total}   |   Durum: {state}", textStyle);
+        GUILayout.Label($"Görev {current + 1}/{set.scenarios.Length} (seed {data.seed})   |   Yol: {waypoints.Length} hücre, {total} adım   |   Robot: {done}/{total}   |   {state}", textStyle);
         GUILayout.EndVertical();
 
         GUILayout.FlexibleSpace();
@@ -220,6 +247,7 @@ public class WarehouseView : MonoBehaviour
         }
         if (GUILayout.Button("Adım", buttonStyle, GUILayout.Width(80))) StepOnce();
         if (GUILayout.Button("Sıfırla", buttonStyle, GUILayout.Width(80))) ResetRun();
+        if (GUILayout.Button("Yeni görev", buttonStyle, GUILayout.Width(110))) NewTask();
 
         GUILayout.Space(16);
         foreach (float s in new[] { 1f, 2f, 4f })
@@ -233,7 +261,7 @@ public class WarehouseView : MonoBehaviour
 
         // lejant
         GUILayout.BeginArea(new Rect(16, h - 36, w - 32, 30));
-        GUILayout.Label(Legend("■", Shelf, "raf") + Legend("●", PathDot, "rota") + Legend("■", StartColor, "başlangıç")
+        GUILayout.Label(Legend("■", Shelf, "raf") + Legend("■", Obstacle, "engel") + Legend("●", PathDot, "rota") + Legend("■", StartColor, "başlangıç")
                       + Legend("◆", GoalColor, "hedef") + Legend("●", RobotColor, "robot"), textStyle);
         GUILayout.EndArea();
     }

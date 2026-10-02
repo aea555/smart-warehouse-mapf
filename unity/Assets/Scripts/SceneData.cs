@@ -11,13 +11,20 @@ public class CellXY
 }
 
 [Serializable]
-public class SceneData
+public class Scenario
 {
+    public int seed;
     public int width;
     public int height;
-    public CellXY[] blocked;
+    public CellXY[] shelves;
+    public CellXY[] obstacles;
     public CellXY start;
     public CellXY goal;
-    public bool hasPath;
     public CellXY[] path;
+}
+
+[Serializable]
+public class ScenarioSet
+{
+    public Scenario[] scenarios;
 }
