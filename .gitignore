@@ -34,3 +34,9 @@ unity/*.csproj
 unity/*.sln
 unity/*.slnx
 unity/.vscode/
+
+# Makale PDFleri (telif — repoya konmaz, sadece yerel)
+docs/papers/
+
+# Yerel calisma notlari
+notes/

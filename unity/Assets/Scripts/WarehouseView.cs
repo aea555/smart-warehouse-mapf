@@ -77,7 +77,13 @@ public class WarehouseView : MonoBehaviour
         int next = Random.Range(0, set.scenarios.Length);
         if (set.scenarios.Length > 1)
             while (next == current) next = Random.Range(0, set.scenarios.Length);
-        current = next;
+        ShowTask(next);
+    }
+
+    // belirli bir senaryoyu göster, index 0'dan başlar
+    public void ShowTask(int index)
+    {
+        current = Mathf.Clamp(index, 0, set.scenarios.Length - 1);
         data = set.scenarios[current];
 
         if (world != null) Destroy(world.gameObject);
