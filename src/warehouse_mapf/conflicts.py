@@ -5,11 +5,9 @@ değiştirmek isterse edge çakışması.
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass
-
 from .grid import Cell
-
+from itertools import combinations
 
 @dataclass(frozen=True)
 class Conflict:
@@ -26,5 +24,15 @@ def detect_conflicts(current: dict[int, Cell], intended: dict[int, Cell]) -> lis
     vertex çakışmasında iki robot aynı hücreye girer, edge çakışmasında iki robot yer değiştirir.
     Boşalan hücreye arkadan girmek çakışma sayılmaz. Her çakışan çift için bir kayıt döner.
     """
-    # TODO
-    raise NotImplementedError
+    robot_pairs = combinations(sorted(current), 2)
+    conflict_list = []
+    for a,b in robot_pairs:
+        if intended[a] == intended[b]:
+            c = Conflict("vertex", (a,b))
+            conflict_list.append(c)
+            continue
+        if (intended[a] == current[b]) and (intended[b] == current[a]):
+            c = Conflict("edge", (a,b))
+            conflict_list.append(c)
+
+    return conflict_list
