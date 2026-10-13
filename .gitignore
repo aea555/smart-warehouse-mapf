@@ -40,3 +40,7 @@ docs/papers/
 
 # Yerel calisma notlari
 notes/
+
+# Uretilen simulasyon kaydi (tools/export_replay.py)
+unity/Assets/StreamingAssets/replay.json
+unity/Assets/StreamingAssets/replay.json.meta

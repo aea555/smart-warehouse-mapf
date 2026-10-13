@@ -23,18 +23,35 @@ uv run pytest   # testleri çalıştırır
 uv run python demo.py   # küçük bir haritada A* ile bulunan yolu ekrana çizer
 ```
 
-## Unity
+## Yöntem
 
-Unity 6 ve URP kullanılıyor, proje `unity/` klasöründe. Şimdilik Unity, A* ile bulunan yolu tek bir
-robotla gösteriyor. Yolu Python buluyor, Unity sadece çiziyor.
+Şimdilik sadece baseline var. Sipariş en yakın boştaki robota verilir ve her robot yolunu A* ile bulur.
+Robotlar diğer robotları hesaba katmaz. Bir robot önündeki robot yüzünden birkaç adım ilerleyemezse
+yolunu yeniden planlar (Local Repair A*).
+
+## Deney
 
 ```bash
-uv run python tools/export_scene.py   # haritayı ve yolu unity/Assets/StreamingAssets/scene.json dosyasına yazar
+uv run python tools/run_experiments.py   # farklı yük ve raf yoğunluklarında baseline'ı çalıştırır
 ```
 
-Sonra `unity/` klasörü Unity Hub ile açılır ve `Assets/Scenes/Warehouse.unity` sahnesi çalıştırılır.
+Sonuçlar `results/experiments.csv` dosyasına yazılır. Aynı seed her çalıştırmada aynı siparişleri üretir.
 
-![Başlangıç](docs/media/01-baslangic.png)
+## Unity
+
+Unity 6 ve URP kullanılıyor, proje `unity/` klasöründe. Unity simülasyonu kendisi çalıştırmaz,
+Python'un kaydettiği simülasyonları oynatır.
+
+```bash
+uv run python tools/export_replay.py   # simülasyon kayıtlarını unity/Assets/StreamingAssets/replay.json dosyasına yazar
+```
+
+Sonra `unity/` klasörü Unity Hub ile açılır ve `Assets/Scenes/Replay.unity` sahnesi çalıştırılır.
+
+![Baseline](docs/media/baseline-orta.png)
+
+Tek robotun A* yolunu gösteren ilk sahne de duruyor. O sahne için `tools/export_scene.py` çalıştırılıp
+`Assets/Scenes/Warehouse.unity` açılır.
 
 ## Plan
 
