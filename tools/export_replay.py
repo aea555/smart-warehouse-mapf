@@ -45,6 +45,9 @@ def record(label, density, robots, rate, seed):
         return {
             "xs": [r.pos[0] for r in sim.robots],
             "ys": [r.pos[1] for r in sim.robots],
+            # robotun bir sonraki adımda gitmek istediği hücre, yolu yoksa kendi hücresi
+            "nx": [(r.path[0] if r.path else r.pos)[0] for r in sim.robots],
+            "ny": [(r.path[0] if r.path else r.pos)[1] for r in sim.robots],
             "phase": [PHASES[r.phase] for r in sim.robots],
             "blocked": [r.blocked_for for r in sim.robots],
             "openPicks": xy({o.pick for o in sim.open_orders}),

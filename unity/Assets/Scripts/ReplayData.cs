@@ -8,6 +8,8 @@ public class ReplayFrame
 {
     public int[] xs;
     public int[] ys;
+    public int[] nx;         // bir sonraki adımda gitmek istediği hücre
+    public int[] ny;
     public int[] phase;      // 0 boşta, 1 toplamaya gidiyor, 2 teslimata gidiyor, 3 parka dönüyor
     public int[] blocked;    // art arda ilerleyemediği adım sayısı
     public CellXY[] openPicks;
