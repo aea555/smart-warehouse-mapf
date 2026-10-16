@@ -41,8 +41,31 @@ def record(label, density, robots, rate, seed):
     orders = generate_orders(warehouse, rate, HORIZON, random.Random(seed))
     sim = Simulation(warehouse, orders, robots, greedy_assign, horizon=HORIZON)
 
+    # Planlar bir kez yazılır, her adımda robot için sadece (plan no, plandaki yeri) tutulur.
+    # Dosya böyle küçük kalıyor, kalan rota Unity tarafında bundan bulunur.
+    plans: list[dict] = []
+    active: list[tuple[int, list]] = [(-1, [])] * robots
+
+    def plan_ref(r):
+        path = list(r.path)
+        if not path:
+            return -1, 0
+        pid, cells = active[r.id]
+        start = len(cells) - len(path)
+        if pid < 0 or start < 0 or cells[start:] != path:
+            plans.append({"xs": [c[0] for c in path], "ys": [c[1] for c in path]})
+            pid, cells, start = len(plans) - 1, path, 0
+            active[r.id] = (pid, cells)
+        return pid, start
+
     def frame():
+        refs = [plan_ref(r) for r in sim.robots]
         return {
+            "plan": [p for p, _ in refs],
+            "planOffset": [o for _, o in refs],
+            "order": [r.order.id if r.order else -1 for r in sim.robots],
+            "tx": [r.target[0] for r in sim.robots],
+            "ty": [r.target[1] for r in sim.robots],
             "xs": [r.pos[0] for r in sim.robots],
             "ys": [r.pos[1] for r in sim.robots],
             # robotun bir sonraki adımda gitmek istediği hücre, yolu yoksa kendi hücresi
@@ -77,6 +100,9 @@ def record(label, density, robots, rate, seed):
         "drops": xy(warehouse.drop_cells),
         "parks": xy(warehouse.park_cells),
         "ordersArrived": sim._next_order,
+        "orders": [{"id": o.id, "arrival": o.arrival, "pick": {"x": o.pick[0], "y": o.pick[1]},
+                    "drop": {"x": o.drop[0], "y": o.drop[1]}} for o in orders],
+        "plans": plans,
         "frames": frames,
     }
 

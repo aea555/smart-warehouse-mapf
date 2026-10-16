@@ -7,7 +7,11 @@ using UnityEngine.InputSystem;
 //
 // Robotların hareketi Python simülasyonundan gelir (src/warehouse_mapf/sim.py). Unity sadece çizer.
 //
-// Kontroller: boşluk oynat/duraklat, sağ/sol ok tek adım, tekerlek yakınlaştır, sürükle kaydır.
+// Haritada her robotun ürün taşıyıp taşımadığı (dolu/boş daire) ve ilerleyip ilerleyemediği
+// (mavi/kırmızı) görünür. Robota tıklanınca rotası, hedefi ve görev bilgisi açılır, diğerleri soluklaşır.
+//
+// Kontroller: boşluk oynat/duraklat, sağ/sol ok tek adım, tekerlek yakınlaştır, sürükle kaydır,
+// robota tıkla rotasını gör, Esc seçimi kaldır.
 //
 // Python'da y aşağı doğru artar, Unity'de yukarı. Bu yüzden y eksi ile çevrilir.
 public class ReplayView : MonoBehaviour
@@ -22,12 +26,11 @@ public class ReplayView : MonoBehaviour
     private static readonly Color DropMark   = new Color(0.20f, 0.65f, 0.60f, 0.35f);
     private static readonly Color ParkMark   = new Color(0.24f, 0.27f, 0.32f);
     private static readonly Color OrderColor = new Color(0.98f, 0.80f, 0.25f);
-    private static readonly Color Idle       = new Color(0.55f, 0.58f, 0.63f);
-    private static readonly Color ToPick     = new Color(0.30f, 0.62f, 1.00f);
-    private static readonly Color ToDrop     = new Color(0.35f, 0.80f, 0.40f);
-    private static readonly Color ToHome     = new Color(0.62f, 0.55f, 0.85f);
-    private static readonly Color Stuck      = new Color(1.00f, 0.25f, 0.25f);
-    private static readonly Color[] PhaseColors = { Idle, ToPick, ToDrop, ToHome };
+    private static readonly Color Moving     = new Color(0.36f, 0.66f, 1.00f);
+    private static readonly Color Stuck      = new Color(1.00f, 0.30f, 0.30f);
+    private static readonly Color Selected   = Color.white;
+
+    private static readonly string[] PhaseNames = { "boşta", "toplamaya gidiyor", "ürünle teslimata gidiyor", "parka dönüyor" };
 
     // ekran düzeni, 720 piksel yüksekliğe göre
     private const float RefHeight = 720f;
@@ -35,20 +38,28 @@ public class ReplayView : MonoBehaviour
     private const float BottomBar = 66f;
 
     private const float MinSpeed = 0.25f, MaxSpeed = 20f;
+    private const float DimAlpha = 0.22f;
 
     private ReplaySet set;
     private ReplayRun run;
     private int current;
     private Transform world;
-    private Sprite square, circle, ring, arrow;
+    private Sprite square, circle, hollow, ring, arrow;
     private Material spriteMaterial;
 
     private SpriteRenderer[] robots = new SpriteRenderer[0];
-    private SpriteRenderer[] cargo = new SpriteRenderer[0];
     private SpriteRenderer[] arrows = new SpriteRenderer[0];
-    private SpriteRenderer[] rings = new SpriteRenderer[0];
     private readonly List<SpriteRenderer> orderPool = new List<SpriteRenderer>();
     private Transform orderRoot;
+
+    // seçili robot
+    private int selected = -1;
+    private LineRenderer routeLine;
+    private SpriteRenderer selectRing, targetMark;
+
+    // katmanlar
+    private bool showArrows;
+    private bool showOrders = true;
 
     private float time;                 // kayıttaki yer, kesirli adım
     private bool playing;
@@ -58,9 +69,9 @@ public class ReplayView : MonoBehaviour
     private Camera cam;
     private float fitSize;
     private bool dragging;
-    private Vector2 lastMouse;
+    private Vector2 pressPos, lastMouse;
 
-    private GUIStyle panelStyle, titleStyle, textStyle, statStyle, buttonStyle;
+    private GUIStyle panelStyle, titleStyle, textStyle, statStyle, buttonStyle, cardStyle;
 
     // kurulum
 
@@ -68,6 +79,7 @@ public class ReplayView : MonoBehaviour
     {
         square = SpriteUtil.Square();
         circle = SpriteUtil.Circle();
+        hollow = SpriteUtil.Ring(64, 0.38f);
         ring = SpriteUtil.Ring();
         arrow = SpriteUtil.Arrow();
         spriteMaterial = SpriteUtil.UnlitMaterial();
@@ -94,6 +106,7 @@ public class ReplayView : MonoBehaviour
         run = set.runs[current];
         if (world != null) Destroy(world.gameObject);
         world = new GameObject("World").transform;
+        selected = -1;
         Build();
         FitCamera();
         time = 0f;
@@ -123,16 +136,27 @@ public class ReplayView : MonoBehaviour
         robotRoot.SetParent(world, false);
         int n = run.robots;
         robots = new SpriteRenderer[n];
-        cargo = new SpriteRenderer[n];
         arrows = new SpriteRenderer[n];
-        rings = new SpriteRenderer[n];
         for (int i = 0; i < n; i++)
         {
-            robots[i] = Spawn($"Robot {i}", circle, Vector3.zero, Idle, 0.70f, 5, robotRoot);
-            cargo[i] = Child(robots[i], square, OrderColor, 0.42f, 6);
-            rings[i] = Child(robots[i], ring, Stuck, 1.55f, 4);
+            robots[i] = Spawn($"Robot {i}", circle, Vector3.zero, Moving, 0.72f, 5, robotRoot);
             arrows[i] = Child(robots[i], arrow, Color.white, 0.45f, 7);
         }
+
+        // seçim göstergeleri
+        var lineGo = new GameObject("Route");
+        lineGo.transform.SetParent(world, false);
+        routeLine = lineGo.AddComponent<LineRenderer>();
+        routeLine.sharedMaterial = spriteMaterial;
+        routeLine.startWidth = routeLine.endWidth = 0.14f;
+        routeLine.startColor = routeLine.endColor = Selected;
+        routeLine.sortingOrder = 4;
+        routeLine.numCornerVertices = 2;
+        routeLine.positionCount = 0;
+
+        selectRing = Spawn("SelectRing", ring, Vector3.zero, Selected, 1.25f, 8, world);
+        targetMark = Spawn("Target", ring, Vector3.zero, Selected, 0.9f, 8, world);
+        selectRing.enabled = targetMark.enabled = false;
     }
 
     private SpriteRenderer Spawn(string name, Sprite sprite, Vector3 pos, Color color,
@@ -152,13 +176,13 @@ public class ReplayView : MonoBehaviour
 
     private SpriteRenderer Child(SpriteRenderer parent, Sprite sprite, Color color, float scale, int order)
     {
-        var sr = Spawn(sprite.name, sprite, Vector3.zero, color, scale, order, parent.transform);
+        var sr = Spawn("Child", sprite, Vector3.zero, color, scale, order, parent.transform);
         sr.transform.localPosition = Vector3.zero;
         sr.transform.localScale = new Vector3(scale, scale, 1f);
         return sr;
     }
 
-    // kamera
+    // kamera ve fare
 
     // haritanın tamamı üst ve alt panelin arasına sığsın
     private void FitCamera()
@@ -174,18 +198,18 @@ public class ReplayView : MonoBehaviour
         fitSize = Mathf.Max(sizeH, sizeW);
         cam.orthographicSize = fitSize;
 
-        // üst panel daha kalın, harita iki panelin arasına ortalanır
         float shift = (TopBar - BottomBar) / RefHeight * fitSize;
         cam.transform.position = new Vector3((run.width - 1) / 2f, -(run.height - 1) / 2f + shift, -10f);
     }
 
-    private void HandleCamera()
+    private void HandleMouse()
     {
         var mouse = Mouse.current;
         if (mouse == null) return;
         Vector2 pos = mouse.position.ReadValue();
         float k = Screen.height / RefHeight;
-        bool overCanvas = pos.y < Screen.height - TopBar * k && pos.y > BottomBar * k;
+        bool overCanvas = pos.y < Screen.height - TopBar * k && pos.y > BottomBar * k
+                          && !(selected >= 0 && CardRect().Contains(new Vector2(pos.x / k, (Screen.height - pos.y) / k)));
 
         float scroll = mouse.scroll.ReadValue().y;
         if (overCanvas && Mathf.Abs(scroll) > 0.01f)
@@ -197,24 +221,47 @@ public class ReplayView : MonoBehaviour
             cam.transform.position += before - after;   // imlecin altındaki nokta yerinde kalsın
         }
 
-        if (mouse.leftButton.wasPressedThisFrame && overCanvas) { dragging = true; lastMouse = pos; }
-        if (!mouse.leftButton.isPressed) dragging = false;
-        if (dragging)
+        if (mouse.leftButton.wasPressedThisFrame && overCanvas) { dragging = true; pressPos = lastMouse = pos; }
+        if (dragging && mouse.leftButton.isPressed)
         {
             Vector3 delta = cam.ScreenToWorldPoint(lastMouse) - cam.ScreenToWorldPoint(pos);
             cam.transform.position += new Vector3(delta.x, delta.y, 0f);
             lastMouse = pos;
         }
+        if (dragging && mouse.leftButton.wasReleasedThisFrame)
+        {
+            dragging = false;
+            if ((pos - pressPos).magnitude < 6f) Select(RobotAt(cam.ScreenToWorldPoint(pos)));   // sürükleme değil, tık
+        }
+    }
+
+    private int RobotAt(Vector3 p)
+    {
+        int best = -1;
+        float bestD = 0.6f;
+        for (int r = 0; r < robots.Length; r++)
+        {
+            float d = Vector2.Distance(robots[r].transform.position, p);
+            if (d < bestD) { bestD = d; best = r; }
+        }
+        return best;
+    }
+
+    private void Select(int r)
+    {
+        selected = r;
+        Apply();
     }
 
     // oynatma
 
     private int LastFrame => run.frames.Length - 1;
+    private int FrameIndex => Mathf.Clamp(Mathf.FloorToInt(time), 0, LastFrame);
 
     private void Update()
     {
         if (run == null) return;
-        HandleCamera();
+        HandleMouse();
 
         var kb = Keyboard.current;
         if (kb != null)
@@ -222,6 +269,7 @@ public class ReplayView : MonoBehaviour
             if (kb.spaceKey.wasPressedThisFrame) TogglePlay();
             if (kb.rightArrowKey.wasPressedThisFrame) Seek(Mathf.Floor(time) + 1f);
             if (kb.leftArrowKey.wasPressedThisFrame) Seek(Mathf.Ceil(time) - 1f);
+            if (kb.escapeKey.wasPressedThisFrame) Select(-1);
         }
 
         if (!playing) return;
@@ -243,41 +291,43 @@ public class ReplayView : MonoBehaviour
         Apply();
     }
 
-    // robotları ve siparişleri şu anki zamana göre yerleştirir
+    // robotları, siparişleri ve seçimi şu anki zamana göre çizer
     private void Apply()
     {
-        int i = Mathf.Clamp(Mathf.FloorToInt(time), 0, LastFrame);
+        int i = FrameIndex;
         int j = Mathf.Min(i + 1, LastFrame);
         float f = Mathf.SmoothStep(0f, 1f, time - i);   // hücreden hücreye yumuşak geçiş
         var a = run.frames[i];
         var b = run.frames[j];
+        bool focus = selected >= 0;
 
         for (int r = 0; r < robots.Length; r++)
         {
             float x = Mathf.Lerp(a.xs[r], b.xs[r], f);
             float y = Mathf.Lerp(a.ys[r], b.ys[r], f);
             robots[r].transform.position = World(x, y);
-            robots[r].color = PhaseColors[a.phase[r]];
-            cargo[r].enabled = a.phase[r] == 2;
 
-            bool stuck = a.blocked[r] > 0;
-            rings[r].enabled = stuck;
-            if (stuck) rings[r].color = new Color(Stuck.r, Stuck.g, Stuck.b, Mathf.Clamp01(0.45f + 0.2f * a.blocked[r]));
+            // dolu daire ürün taşıyor, boş daire taşımıyor, kırmızı ilerleyemiyor
+            robots[r].sprite = a.phase[r] == 2 ? circle : hollow;
+            Color c = a.blocked[r] > 0 ? Stuck : Moving;
+            if (focus && r != selected) c.a = DimAlpha;
+            robots[r].color = c;
 
-            // ok robotun gitmek istediği yöne bakar
             int dx = a.nx[r] - a.xs[r], dy = a.ny[r] - a.ys[r];
-            bool wants = dx != 0 || dy != 0;
+            bool wants = (showArrows || r == selected) && (dx != 0 || dy != 0);
             arrows[r].enabled = wants;
             if (wants)
             {
-                var dir = new Vector3(dx, -dy, 0f);
-                arrows[r].transform.localPosition = dir * 0.62f;
+                arrows[r].transform.localPosition = new Vector3(dx, -dy, 0f) * 0.62f;
                 arrows[r].transform.localRotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(-dy, dx) * Mathf.Rad2Deg);
-                arrows[r].color = stuck ? Stuck : Color.white;
+                Color ac = a.blocked[r] > 0 ? Stuck : Color.white;
+                if (focus && r != selected) ac.a = DimAlpha;
+                arrows[r].color = ac;
             }
         }
 
-        while (orderPool.Count < a.openPicks.Length)
+        int shown = showOrders ? a.openPicks.Length : 0;
+        while (orderPool.Count < shown)
         {
             var d = Spawn("Order", square, Vector3.zero, OrderColor, 0.30f, 3, orderRoot);
             d.transform.rotation = Quaternion.Euler(0f, 0f, 45f);   // elmas gibi dursun
@@ -285,10 +335,38 @@ public class ReplayView : MonoBehaviour
         }
         for (int k = 0; k < orderPool.Count; k++)
         {
-            bool on = k < a.openPicks.Length;
+            bool on = k < shown;
             orderPool[k].enabled = on;
-            if (on) orderPool[k].transform.position = World(a.openPicks[k].x, a.openPicks[k].y);
+            if (on)
+            {
+                orderPool[k].transform.position = World(a.openPicks[k].x, a.openPicks[k].y);
+                orderPool[k].color = focus ? new Color(OrderColor.r, OrderColor.g, OrderColor.b, DimAlpha) : OrderColor;
+            }
         }
+
+        DrawSelection(a);
+    }
+
+    // seçili robotun rotası ve hedefi
+    private void DrawSelection(ReplayFrame a)
+    {
+        bool on = selected >= 0;
+        selectRing.enabled = targetMark.enabled = on;
+        if (!on) { routeLine.positionCount = 0; return; }
+
+        Vector3 here = robots[selected].transform.position;
+        selectRing.transform.position = here;
+        targetMark.transform.position = World(a.tx[selected], a.ty[selected]);
+
+        var pts = new List<Vector3> { here };
+        int p = a.plan[selected];
+        if (p >= 0)
+        {
+            var plan = run.plans[p];
+            for (int k = a.planOffset[selected]; k < plan.xs.Length; k++) pts.Add(World(plan.xs[k], plan.ys[k]));
+        }
+        routeLine.positionCount = pts.Count;
+        routeLine.SetPositions(pts.ToArray());
     }
 
     // arayüz
@@ -296,14 +374,29 @@ public class ReplayView : MonoBehaviour
     private void InitStyles()
     {
         if (panelStyle != null) return;
-        var bg = new Texture2D(1, 1);
-        bg.SetPixel(0, 0, new Color(0.04f, 0.045f, 0.06f, 0.96f));
-        bg.Apply();
-        panelStyle = new GUIStyle { normal = { background = bg }, padding = new RectOffset(14, 14, 8, 8) };
-        titleStyle = new GUIStyle { fontSize = 18, fontStyle = FontStyle.Bold, normal = { textColor = Color.white } };
-        textStyle  = new GUIStyle { fontSize = 13, richText = true, normal = { textColor = new Color(0.78f, 0.81f, 0.86f) } };
-        statStyle  = new GUIStyle(textStyle) { fontSize = 15 };
+        panelStyle = new GUIStyle { normal = { background = Solid(new Color(0.04f, 0.045f, 0.06f, 0.96f)) }, padding = new RectOffset(14, 14, 8, 8) };
+        cardStyle  = new GUIStyle { normal = { background = Solid(new Color(0.06f, 0.07f, 0.09f, 0.94f)) }, padding = new RectOffset(14, 14, 10, 10) };
+        titleStyle = new GUIStyle { fontSize = 18, fontStyle = FontStyle.Bold, richText = true, normal = { textColor = Color.white } };
+        textStyle  = new GUIStyle { fontSize = 13, richText = true, wordWrap = true, normal = { textColor = new Color(0.78f, 0.81f, 0.86f) } };
+        statStyle  = new GUIStyle(textStyle) { fontSize = 15, wordWrap = false };
         buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = 13, fixedHeight = 26 };
+    }
+
+    private static Texture2D Solid(Color c)
+    {
+        var t = new Texture2D(1, 1);
+        t.SetPixel(0, 0, c);
+        t.Apply();
+        return t;
+    }
+
+    // kart robotun karşı tarafında durur, robotu ve rotasını örtmesin
+    private Rect CardRect()
+    {
+        float w = Screen.width / (Screen.height / RefHeight);
+        bool robotOnRight = selected >= 0 && cam.WorldToViewportPoint(robots[selected].transform.position).x > 0.5f;
+        float x = robotOnRight ? 14f : w - 300f;
+        return new Rect(x, TopBar + 12, 286, 150);
     }
 
     private void OnGUI()
@@ -320,7 +413,7 @@ public class ReplayView : MonoBehaviour
             return;
         }
 
-        var fr = run.frames[Mathf.Clamp(Mathf.FloorToInt(time), 0, LastFrame)];
+        var fr = run.frames[FrameIndex];
         int stuck = 0;
         foreach (int bl in fr.blocked) if (bl > 0) stuck++;
 
@@ -329,10 +422,10 @@ public class ReplayView : MonoBehaviour
         GUILayout.BeginArea(new Rect(14, 8, w - 28, TopBar - 12));
         GUILayout.BeginHorizontal();
         GUILayout.BeginVertical();
-        GUILayout.Label($"{run.label}  <size=13><color=#9aa3ad>({current + 1}/{set.runs.Length})</color></size>", new GUIStyle(titleStyle) { richText = true });
-        GUILayout.Label($"{run.policy}  ·  {run.robots} robot  ·  {run.rate:0.00} sipariş/adım  ·  raf yoğunluğu {run.density}  ·  seed {run.seed}", textStyle);
+        GUILayout.Label($"{run.label}  <size=13><color=#9aa3ad>({current + 1}/{set.runs.Length})</color></size>", titleStyle);
+        GUILayout.Label($"{run.policy}  ·  {run.robots} robot  ·  {run.rate:0.00} sipariş/adım  ·  raf yoğunluğu {run.density}  ·  seed {run.seed}", statStyle);
         GUILayout.Space(4);
-        GUILayout.Label($"Adım <b>{Mathf.FloorToInt(time)}</b>/{LastFrame}     Tamamlanan <b>{fr.completed}</b>/{fr.arrived}     "
+        GUILayout.Label($"Adım <b>{FrameIndex}</b>/{LastFrame}     Tamamlanan <b>{fr.completed}</b>/{fr.arrived}     "
                       + $"Bekleyen sipariş <b>{fr.open}</b>     Çakışma <b>{fr.conflicts}</b>     "
                       + $"<color=#ff6b6b>İlerleyemeyen robot <b>{stuck}</b></color>", statStyle);
         GUILayout.EndVertical();
@@ -352,22 +445,59 @@ public class ReplayView : MonoBehaviour
         GUILayout.EndHorizontal();
         GUILayout.EndArea();
 
-        // alt panelde hız, zaman çizelgesi ve lejant
+        if (selected >= 0) DrawCard(fr);
+
+        // alt panelde hız, zaman, katmanlar ve lejant
         GUI.Box(new Rect(0, h - BottomBar, w, BottomBar), GUIContent.none, panelStyle);
-        GUI.Label(new Rect(14, h - BottomBar + 8, 170, 20), $"Hız: <b>{stepsPerSecond:0.##}</b> adım/sn", textStyle);
-        float logSpeed = GUI.HorizontalSlider(new Rect(150, h - BottomBar + 12, 150, 16),
+        float y0 = h - BottomBar + 8;
+        GUI.Label(new Rect(14, y0, 170, 20), $"Hız: <b>{stepsPerSecond:0.##}</b> adım/sn", textStyle);
+        float logSpeed = GUI.HorizontalSlider(new Rect(150, y0 + 4, 140, 16),
             Mathf.Log(stepsPerSecond), Mathf.Log(MinSpeed), Mathf.Log(MaxSpeed));
         stepsPerSecond = Mathf.Exp(logSpeed);
 
-        GUI.Label(new Rect(320, h - BottomBar + 8, 60, 20), "Zaman", textStyle);
-        float newTime = GUI.HorizontalSlider(new Rect(370, h - BottomBar + 12, w - 384, 16), time, 0f, LastFrame);
+        bool arrowsBefore = showArrows, ordersBefore = showOrders;
+        showArrows = GUI.Toggle(new Rect(305, y0, 130, 20), showArrows, " Yön okları");
+        showOrders = GUI.Toggle(new Rect(425, y0, 170, 20), showOrders, " Bekleyen siparişler");
+        if (arrowsBefore != showArrows || ordersBefore != showOrders) Apply();
+
+        GUI.Label(new Rect(595, y0, 60, 20), "Zaman", textStyle);
+        float newTime = GUI.HorizontalSlider(new Rect(645, y0 + 4, w - 659, 16), time, 0f, LastFrame);
         if (!Mathf.Approximately(newTime, time)) Seek(newTime);
 
         GUI.Label(new Rect(14, h - 30, w - 28, 22),
-            Legend("●", Idle, "boşta") + Legend("●", ToPick, "toplamaya gidiyor") + Legend("●", ToDrop, "ürünle teslimata gidiyor")
-            + Legend("●", ToHome, "parka dönüyor") + Legend("➤", Color.white, "gitmek istediği yön") + Legend("◯", Stuck, "ilerleyemiyor")
+            Legend("●", Moving, "ürün taşıyor") + Legend("○", Moving, "boş") + Legend("●", Stuck, "ilerleyemiyor")
             + Legend("◆", OrderColor, "bekleyen sipariş") + Legend("■", Shelf, "raf") + Legend("■", Station, "paketleme")
-            + "   <color=#9aa3ad>tekerlek: yakınlaştır · sürükle: kaydır · boşluk: başlat/duraklat</color>", textStyle);
+            + "   <color=#9aa3ad>robota tıkla: rota ve görev · tekerlek: yakınlaştır · sürükle: kaydır · boşluk: başlat/duraklat · Esc: seçimi kaldır</color>", statStyle);
+    }
+
+    private void DrawCard(ReplayFrame fr)
+    {
+        int r = selected;
+        int phase = fr.phase[r];
+        string state = fr.blocked[r] > 0
+            ? $"<color=#ff6b6b><b>{fr.blocked[r]} adımdır ilerleyemiyor</b></color>"
+            : "ilerliyor";
+        if (phase == 0) state = "parkta bekliyor";
+
+        string task = "görev yok";
+        int oid = fr.order[r];
+        if (oid >= 0)
+        {
+            var o = run.orders[oid];
+            task = $"Sipariş #{o.id} ({o.arrival}. adımda geldi)\nraf ({o.pick.x}, {o.pick.y}) → istasyon ({o.drop.x}, {o.drop.y})";
+        }
+        int remaining = 0;
+        if (fr.plan[r] >= 0) remaining = run.plans[fr.plan[r]].xs.Length - fr.planOffset[r];
+
+        GUILayout.BeginArea(CardRect(), cardStyle);
+        GUILayout.Label($"Robot {r}", titleStyle);
+        GUILayout.Space(4);
+        GUILayout.Label($"<b>Ne yapıyor:</b> {PhaseNames[phase]}", textStyle);
+        GUILayout.Label($"<b>Durum:</b> {state}", textStyle);
+        GUILayout.Label($"<b>Görev:</b> {task}", textStyle);
+        GUILayout.Label($"<b>Konum:</b> ({fr.xs[r]}, {fr.ys[r]})   <b>Hedef:</b> ({fr.tx[r]}, {fr.ty[r]})", textStyle);
+        GUILayout.Label($"<b>Kalan rota:</b> {remaining} adım", textStyle);
+        GUILayout.EndArea();
     }
 
     private static string Legend(string symbol, Color c, string label) =>
