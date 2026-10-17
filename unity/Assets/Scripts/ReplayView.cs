@@ -382,6 +382,9 @@ public class ReplayView : MonoBehaviour
         buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = 13, fixedHeight = 26 };
     }
 
+    private Texture2D warmupTex;
+    private Texture2D WarmupTex() => warmupTex != null ? warmupTex : (warmupTex = Solid(new Color(0.95f, 0.79f, 0.30f, 0.35f)));
+
     private static Texture2D Solid(Color c)
     {
         var t = new Texture2D(1, 1);
@@ -419,29 +422,28 @@ public class ReplayView : MonoBehaviour
 
         // üst panelde senaryo ve anlık durum
         GUI.Box(new Rect(0, 0, w, TopBar), GUIContent.none, panelStyle);
-        GUILayout.BeginArea(new Rect(14, 8, w - 28, TopBar - 12));
-        GUILayout.BeginHorizontal();
-        GUILayout.BeginVertical();
+        const float controlsW = 440f;
+        GUILayout.BeginArea(new Rect(14, 8, w - controlsW - 40, TopBar - 12));
         GUILayout.Label($"{run.label}  <size=13><color=#9aa3ad>({current + 1}/{set.runs.Length})</color></size>", titleStyle);
         GUILayout.Label($"{run.policy}  ·  {run.robots} robot  ·  {run.rate:0.00} sipariş/adım  ·  raf yoğunluğu {run.density}  ·  seed {run.seed}", statStyle);
         GUILayout.Space(4);
-        GUILayout.Label($"Adım <b>{FrameIndex}</b>/{LastFrame}     Tamamlanan <b>{fr.completed}</b>/{fr.arrived}     "
-                      + $"Bekleyen sipariş <b>{fr.open}</b>     Çakışma <b>{fr.conflicts}</b>     "
-                      + $"<color=#ff6b6b>İlerleyemeyen robot <b>{stuck}</b></color>", statStyle);
-        GUILayout.EndVertical();
-        GUILayout.FlexibleSpace();
-        GUILayout.BeginVertical(GUILayout.Width(330));
+        string phaseNote = FrameIndex < run.warmup ? " <color=#f2c94c>(ısınma)</color>" : "";
+        GUILayout.Label($"Adım <b>{FrameIndex}</b>/{LastFrame}{phaseNote}   Tamamlanan <b>{fr.completed}</b>/{fr.arrived}   "
+                      + $"Bekleyen <b>{fr.open}</b>   Çakışma <b>{fr.conflicts}</b>   "
+                      + $"<color=#ff6b6b>Sıkışan robot <b>{stuck}</b></color>", statStyle);
+        GUILayout.EndArea();
+
+        GUILayout.BeginArea(new Rect(w - controlsW - 14, 10, controlsW, TopBar - 14));
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("◀ Önceki kayıt", buttonStyle)) ShowRun(current - 1);
         if (GUILayout.Button("Sonraki kayıt ▶", buttonStyle)) ShowRun(current + 1);
         GUILayout.EndHorizontal();
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button(playing ? "❚❚ Duraklat" : "▶ Başlat", buttonStyle, GUILayout.Width(110))) TogglePlay();
+        if (GUILayout.Button(playing ? "❚❚ Duraklat" : "▶ Başlat", buttonStyle, GUILayout.Width(100))) TogglePlay();
         if (GUILayout.Button("◀ Adım", buttonStyle)) Seek(Mathf.Ceil(time) - 1f);
         if (GUILayout.Button("Adım ▶", buttonStyle)) Seek(Mathf.Floor(time) + 1f);
+        if (GUILayout.Button("Isınmayı atla ⏭", buttonStyle, GUILayout.Width(120))) Seek(run.warmup);
         if (GUILayout.Button("Sığdır", buttonStyle)) FitCamera();
-        GUILayout.EndHorizontal();
-        GUILayout.EndVertical();
         GUILayout.EndHorizontal();
         GUILayout.EndArea();
 
@@ -461,13 +463,17 @@ public class ReplayView : MonoBehaviour
         if (arrowsBefore != showArrows || ordersBefore != showOrders) Apply();
 
         GUI.Label(new Rect(595, y0, 60, 20), "Zaman", textStyle);
-        float newTime = GUI.HorizontalSlider(new Rect(645, y0 + 4, w - 659, 16), time, 0f, LastFrame);
+        var bar = new Rect(645, y0 + 4, w - 659, 16);
+        // zaman çubuğunda ısınma bölümü sarı gölgeli
+        GUI.DrawTexture(new Rect(bar.x, bar.y + 3, bar.width * run.warmup / LastFrame, bar.height - 6), WarmupTex());
+        float newTime = GUI.HorizontalSlider(bar, time, 0f, LastFrame);
         if (!Mathf.Approximately(newTime, time)) Seek(newTime);
 
         GUI.Label(new Rect(14, h - 30, w - 28, 22),
-            Legend("●", Moving, "ürün taşıyor") + Legend("○", Moving, "boş") + Legend("●", Stuck, "ilerleyemiyor")
+            Legend("●", Moving, "ürün taşıyor") + Legend("○", Moving, "boş") + Legend("●", Stuck, "sıkışmış (ilerleyemiyor)")
             + Legend("◆", OrderColor, "bekleyen sipariş") + Legend("■", Shelf, "raf") + Legend("■", Station, "paketleme")
-            + "   <color=#9aa3ad>robota tıkla: rota ve görev · tekerlek: yakınlaştır · sürükle: kaydır · boşluk: başlat/duraklat · Esc: seçimi kaldır</color>", statStyle);
+            + $"{Legend("▬", new Color(0.95f, 0.79f, 0.30f), $"ısınma (ilk {run.warmup} adım, ölçüme dahil değil)")}"
+            + "  <color=#9aa3ad>tıkla: robot ayrıntısı · tekerlek/sürükle: yakınlaştır/kaydır · boşluk: oynat</color>", statStyle);
     }
 
     private void DrawCard(ReplayFrame fr)

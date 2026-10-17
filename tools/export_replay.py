@@ -18,6 +18,7 @@ from warehouse_mapf.orders import generate_orders
 from warehouse_mapf.sim import Simulation
 from warehouse_mapf.warehouse import generate_warehouse
 
+WARMUP = 200     # ısınma süresi, Unity'de atlanabilir
 HORIZON = 1000
 PHASES = {"idle": 0, "to_pick": 1, "to_drop": 2, "to_home": 3}
 # (etiket, raf yoğunluğu, robot, adım başına sipariş, seed)
@@ -38,8 +39,8 @@ def xy(cells):
 def record(label, density, robots, rate, seed):
     warehouse = generate_warehouse(density=density)
     grid = warehouse.grid
-    orders = generate_orders(warehouse, rate, HORIZON, random.Random(seed))
-    sim = Simulation(warehouse, orders, robots, greedy_assign, horizon=HORIZON)
+    orders = generate_orders(warehouse, rate, WARMUP + HORIZON, random.Random(seed))
+    sim = Simulation(warehouse, orders, robots, greedy_assign, horizon=HORIZON, warmup=WARMUP)
 
     # Planlar bir kez yazılır, her adımda robot için sadece (plan no, plandaki yeri) tutulur.
     # Dosya böyle küçük kalıyor, kalan rota Unity tarafında bundan bulunur.
@@ -81,7 +82,7 @@ def record(label, density, robots, rate, seed):
         }
 
     frames = [frame()]
-    while sim.t < HORIZON:
+    while sim.t < WARMUP + HORIZON:
         sim.step()
         frames.append(frame())
 
@@ -93,6 +94,7 @@ def record(label, density, robots, rate, seed):
         "robots": robots,
         "rate": rate,
         "seed": seed,
+        "warmup": WARMUP,
         "width": grid.width,
         "height": grid.height,
         "shelves": xy(grid.blocked - stations),

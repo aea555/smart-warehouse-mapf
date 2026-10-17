@@ -49,6 +49,7 @@ public class ReplayRun
     public int robots;
     public float rate;
     public int seed;
+    public int warmup;       // bu adıma kadar ölçüm yok
     public int width;
     public int height;
     public CellXY[] shelves;

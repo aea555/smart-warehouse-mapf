@@ -8,6 +8,7 @@ Her adımda sırasıyla şunlar olur.
 
 Robotlar birbirinin planını bilmez, her biri kendi A*'ını çalıştırır (P0).
 Sipariş en yakın boştaki robota verilir.
+İlk warmup adımı metriklere katılmaz.
 """
 
 from __future__ import annotations
@@ -47,7 +48,8 @@ class Robot:
 
 @dataclass
 class Metrics:
-    steps: int
+    steps: int                     # ölçülen adım sayısı (ısınma hariç)
+    warmup: int
     robots: int
     orders_arrived: int
     orders_completed: int
@@ -61,7 +63,8 @@ class Metrics:
 
 class Simulation:
     def __init__(self, warehouse: Warehouse, orders: list[Order], n_robots: int,
-                 assign: Assigner, horizon: int = 1000, repair_after: int = 3):
+                 assign: Assigner, horizon: int = 1000, repair_after: int = 3,
+                 warmup: int = 0):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -69,6 +72,7 @@ class Simulation:
         self.orders = sorted(orders, key=lambda o: o.arrival)
         self.assign = assign
         self.horizon = horizon
+        self.warmup = warmup
         self.repair_after = repair_after
 
         # robotları park yerlerine eşit aralıklarla diz
@@ -83,6 +87,7 @@ class Simulation:
         self.task_waits_done = 0
         self.conflicts = 0
         self.repairs = 0
+        self._baseline: dict | None = None   # ısınma bitiminde sayaçların değeri
 
     def plan(self, robot: Robot, avoid: set[Cell] | None = None) -> None:
         grid = self.grid
@@ -175,19 +180,35 @@ class Simulation:
         elif r.phase == "to_home":
             r.phase = "idle"
 
+    def _counters(self) -> dict:
+        return {
+            "completed": len(self.completion_times),
+            "arrived": self._next_order,
+            "distance": sum(r.distance for r in self.robots),
+            "waits": self.task_waits_done,
+            "conflicts": self.conflicts,
+            "repairs": self.repairs,
+        }
+
     def run(self) -> Metrics:
-        while self.t < self.horizon:
+        total = self.warmup + self.horizon
+        while self.t < total:
+            if self.t == self.warmup:
+                self._baseline = self._counters()
             self.step()
-        done = len(self.completion_times)
+        start, end = self._baseline, self._counters()
+        times = self.completion_times[start["completed"]:]
+        done = len(times)
         return Metrics(
             steps=self.horizon,
+            warmup=self.warmup,
             robots=len(self.robots),
-            orders_arrived=self._next_order,
+            orders_arrived=end["arrived"] - start["arrived"],
             orders_completed=done,
             throughput=100 * done / self.horizon,
-            mean_completion_time=sum(self.completion_times) / done if done else float("nan"),
-            mean_distance=sum(r.distance for r in self.robots) / len(self.robots),
-            mean_wait_per_order=self.task_waits_done / done if done else float("nan"),
-            conflicts=self.conflicts,
-            repairs=self.repairs,
+            mean_completion_time=sum(times) / done if done else float("nan"),
+            mean_distance=(end["distance"] - start["distance"]) / len(self.robots),
+            mean_wait_per_order=(end["waits"] - start["waits"]) / done if done else float("nan"),
+            conflicts=end["conflicts"] - start["conflicts"],
+            repairs=end["repairs"] - start["repairs"],
         )

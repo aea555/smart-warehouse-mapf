@@ -18,6 +18,7 @@ from warehouse_mapf.orders import generate_orders
 from warehouse_mapf.sim import Simulation
 from warehouse_mapf.warehouse import generate_warehouse
 
+WARMUP = 200     # ısınma süresi, metriklere katılmaz
 HORIZON = 1000   # ölçülen adım sayısı
 SEEDS = range(10)
 DENSITIES = ["low", "medium", "high"]
@@ -36,8 +37,9 @@ def main() -> None:
             warehouse = generate_warehouse(density=density)
             for load, (robots, rate) in LOADS.items():
                 for seed in SEEDS:
-                    orders = generate_orders(warehouse, rate, HORIZON, random.Random(seed))
-                    metrics = Simulation(warehouse, orders, robots, assign, horizon=HORIZON).run()
+                    orders = generate_orders(warehouse, rate, WARMUP + HORIZON, random.Random(seed))
+                    metrics = Simulation(warehouse, orders, robots, assign,
+                                         horizon=HORIZON, warmup=WARMUP).run()
                     rows.append({"policy": policy, "density": density, "load": load,
                                  "rate": rate, "seed": seed, **asdict(metrics)})
                 print(f"{policy} {density} {load} tamam")
