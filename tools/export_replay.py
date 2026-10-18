@@ -23,10 +23,10 @@ HORIZON = 1000
 PHASES = {"idle": 0, "to_pick": 1, "to_drop": 2, "to_home": 3}
 # (etiket, raf yoğunluğu, robot, adım başına sipariş, seed)
 RUNS = [
-    ("Düşük yük", "medium", 10, 0.15, 0),
-    ("Orta yük", "medium", 20, 0.30, 0),
-    ("Yüksek yük (akıyor)", "medium", 30, 0.45, 6),
-    ("Yüksek yük (kilitleniyor)", "medium", 30, 0.45, 9),
+    ("Düşük yük · seed 0", "medium", 10, 0.15, 0),
+    ("Orta yük · seed 0", "medium", 20, 0.30, 0),
+    ("Yüksek yük · seed 6", "medium", 30, 0.45, 6),
+    ("Yüksek yük · seed 2", "medium", 30, 0.45, 2),
 ]
 
 OUT = Path(__file__).resolve().parent.parent / "unity" / "Assets" / "StreamingAssets" / "replay.json"
@@ -40,7 +40,7 @@ def record(label, density, robots, rate, seed):
     warehouse = generate_warehouse(density=density)
     grid = warehouse.grid
     orders = generate_orders(warehouse, rate, WARMUP + HORIZON, random.Random(seed))
-    sim = Simulation(warehouse, orders, robots, greedy_assign, horizon=HORIZON, warmup=WARMUP)
+    sim = Simulation(warehouse, orders, robots, greedy_assign, horizon=HORIZON, warmup=WARMUP, seed=seed)
 
     # Planlar bir kez yazılır, her adımda robot için sadece (plan no, plandaki yeri) tutulur.
     # Dosya böyle küçük kalıyor, kalan rota Unity tarafında bundan bulunur.
@@ -89,7 +89,7 @@ def record(label, density, robots, rate, seed):
     stations = {c for c in grid.blocked if c[0] == grid.width - 1}
     return {
         "label": label,
-        "policy": "P0: greedy atama + bağımsız A* (Local Repair)",
+        "policy": "P0: greedy atama + bağımsız A* (Local Repair, Silver 2005)",
         "density": density,
         "robots": robots,
         "rate": rate,

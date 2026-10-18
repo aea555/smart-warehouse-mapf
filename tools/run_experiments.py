@@ -24,7 +24,11 @@ SEEDS = range(10)
 DENSITIES = ["low", "medium", "high"]
 # yük seviyesi -> (robot sayısı, adım başına sipariş)
 LOADS = {"low": (10, 0.15), "medium": (20, 0.30), "high": (30, 0.45)}
-POLICIES = {"P0_greedy_independent": greedy_assign}
+# politika -> (atama fonksiyonu, Simulation'a ek ayarlar)
+POLICIES = {
+    "P0_no_agitation": (greedy_assign, {"agitation": False}),
+    "P0": (greedy_assign, {"agitation": True}),   # Local Repair A* (Silver 2005)
+}
 
 OUT = Path(__file__).resolve().parent.parent / "results" / "experiments.csv"
 
@@ -32,14 +36,14 @@ OUT = Path(__file__).resolve().parent.parent / "results" / "experiments.csv"
 def main() -> None:
     OUT.parent.mkdir(exist_ok=True)
     rows = []
-    for policy, assign in POLICIES.items():
+    for policy, (assign, options) in POLICIES.items():
         for density in DENSITIES:
             warehouse = generate_warehouse(density=density)
             for load, (robots, rate) in LOADS.items():
                 for seed in SEEDS:
                     orders = generate_orders(warehouse, rate, WARMUP + HORIZON, random.Random(seed))
-                    metrics = Simulation(warehouse, orders, robots, assign,
-                                         horizon=HORIZON, warmup=WARMUP).run()
+                    metrics = Simulation(warehouse, orders, robots, assign, horizon=HORIZON,
+                                         warmup=WARMUP, seed=seed, **options).run()
                     rows.append({"policy": policy, "density": density, "load": load,
                                  "rate": rate, "seed": seed, **asdict(metrics)})
                 print(f"{policy} {density} {load} tamam")

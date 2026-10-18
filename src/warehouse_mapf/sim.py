@@ -8,15 +8,18 @@ Her adımda sırasıyla şunlar olur.
 
 Robotlar birbirinin planını bilmez, her biri kendi A*'ını çalıştırır (P0).
 Sipariş en yakın boştaki robota verilir.
-İlk warmup adımı metriklere katılmaz.
+İlk warmup adımı metriklere katılmaz. stall_window adım boyunca hiç teslimat olmazsa
+tıkanma sayılır.
 """
 
 from __future__ import annotations
 
+import heapq
+import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .astar import find_path
+from .astar import find_path, manhattan, reconstruct_path
 from .conflicts import detect_conflicts
 from .grid import Cell, Grid
 from .orders import Order
@@ -36,6 +39,7 @@ class Robot:
     blocked_for: int = 0           # art arda ilerleyemediği adım sayısı
     distance: int = 0
     task_waits: int = 0            # sipariş taşırken beklediği adım sayısı
+    agitation: int = 0             # Local Repair'de yol aramasına eklenen gürültü miktarı
 
     @property
     def target(self) -> Cell:
@@ -59,12 +63,16 @@ class Metrics:
     mean_wait_per_order: float     # tamamlanan sipariş başına bekleme adımı
     conflicts: int                 # tespit edilen çakışma sayısı
     repairs: int                   # Local Repair ile yeniden planlama sayısı
+    stalls: int                    # tıkanma sayısı (stall_window adım hiç teslimat yok)
+    stalls_resolved: int           # kendiliğinden çözülen tıkanma sayısı
+    deadlocked: int                # simülasyon tıkanmış halde bittiyse 1
 
 
 class Simulation:
     def __init__(self, warehouse: Warehouse, orders: list[Order], n_robots: int,
                  assign: Assigner, horizon: int = 1000, repair_after: int = 3,
-                 warmup: int = 0):
+                 warmup: int = 0, agitation: bool = True, seed: int = 0,
+                 stall_window: int = 200):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -74,6 +82,9 @@ class Simulation:
         self.horizon = horizon
         self.warmup = warmup
         self.repair_after = repair_after
+        self.use_agitation = agitation
+        self.rng = random.Random(seed)
+        self.stall_window = stall_window
 
         # robotları park yerlerine eşit aralıklarla diz
         parks = warehouse.park_cells
@@ -88,13 +99,41 @@ class Simulation:
         self.conflicts = 0
         self.repairs = 0
         self._baseline: dict | None = None   # ısınma bitiminde sayaçların değeri
+        self._last_completion = 0
+        self.stalls = 0
+        self.stalls_resolved = 0
+        self.in_stall = False
 
     def plan(self, robot: Robot, avoid: set[Cell] | None = None) -> None:
         grid = self.grid
         if avoid:
             grid = Grid(grid.width, grid.height, grid.blocked | (avoid - {robot.target}))
-        path = find_path(grid, robot.pos, robot.target)
+        if self.use_agitation and robot.agitation > 0:
+            path = self._noisy_path(grid, robot.pos, robot.target, noise=robot.agitation)
+        else:
+            path = find_path(grid, robot.pos, robot.target)
         robot.path = path[1:] if path else []
+
+    def _noisy_path(self, grid: Grid, start: Cell, goal: Cell, noise: float) -> list[Cell] | None:
+        """A*, ama hedefe mesafe tahminine [0, noise) arası rastgele sayı ekleniyor (agitation).
+
+        Takılıp duran robot böylece her seferinde biraz farklı yollar dener.
+        """
+        g = {start: 0}
+        came_from: dict[Cell, Cell] = {}
+        frontier = [(manhattan(start, goal), start)]
+        while frontier:
+            _, cell = heapq.heappop(frontier)
+            if cell == goal:
+                return reconstruct_path(came_from, goal)
+            for n in grid.neighbors(cell):
+                cost = g[cell] + 1
+                if n not in g or cost < g[n]:
+                    g[n] = cost
+                    came_from[n] = cell
+                    h = manhattan(n, goal) + self.rng.uniform(0, noise)
+                    heapq.heappush(frontier, (cost + h, n))
+        return None
 
     def step(self) -> None:
         self._release_orders()
@@ -135,11 +174,27 @@ class Simulation:
         occupied = {r.pos for r in self.robots}
         for r in self.robots:
             if r.blocked_for >= self.repair_after:
+                if self.use_agitation:
+                    r.agitation += 1
                 self.plan(r, avoid=occupied - {r.pos})
                 r.blocked_for = 0
                 self.repairs += 1
 
+        self._track_stall()
+
         self.t += 1
+
+    def _track_stall(self) -> None:
+        if self.t < self.warmup:
+            return
+        busy = self.open_orders or any(r.phase in ("to_pick", "to_drop") for r in self.robots)
+        since = self.t - max(self._last_completion, self.warmup)
+        if self.in_stall and self._last_completion == self.t:
+            self.in_stall = False
+            self.stalls_resolved += 1
+        elif not self.in_stall and busy and since >= self.stall_window:
+            self.in_stall = True
+            self.stalls += 1
 
     def _release_orders(self) -> None:
         while self._next_order < len(self.orders) and self.orders[self._next_order].arrival <= self.t:
@@ -167,11 +222,13 @@ class Simulation:
             if not r.path and r.phase != "idle":
                 self.plan(r)           # yolu yok, tekrar dene
             return
+        r.agitation = 0
         if r.phase == "to_pick":
             r.phase = "to_drop"
             self.plan(r)
         elif r.phase == "to_drop":
             self.completion_times.append(self.t + 1 - r.order.arrival)
+            self._last_completion = self.t
             self.task_waits_done += r.task_waits
             r.task_waits = 0
             r.order = None
@@ -211,4 +268,7 @@ class Simulation:
             mean_wait_per_order=(end["waits"] - start["waits"]) / done if done else float("nan"),
             conflicts=end["conflicts"] - start["conflicts"],
             repairs=end["repairs"] - start["repairs"],
+            stalls=self.stalls,
+            stalls_resolved=self.stalls_resolved,
+            deadlocked=int(self.in_stall),
         )
