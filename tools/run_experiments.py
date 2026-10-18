@@ -28,6 +28,7 @@ LOADS = {"low": (10, 0.15), "medium": (20, 0.30), "high": (30, 0.45)}
 POLICIES = {
     "P0_no_agitation": (greedy_assign, {"agitation": False}),
     "P0": (greedy_assign, {"agitation": True}),   # Local Repair A* (Silver 2005)
+    "P1": (greedy_assign, {"planner": "cooperative"}),   # Cooperative A*, rotanın tamamı rezerve edilir
 }
 
 OUT = Path(__file__).resolve().parent.parent / "results" / "experiments.csv"

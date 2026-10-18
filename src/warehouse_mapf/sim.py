@@ -6,7 +6,7 @@ Her adımda sırasıyla şunlar olur.
 3. Robotlar hareket eder. Hedefe varan robot görevin sonraki aşamasına geçer.
 4. Birkaç adım ilerleyemeyen robot yolunu yeniden planlar (Local Repair).
 
-Robotlar birbirinin planını bilmez, her biri kendi A*'ını çalıştırır (P0).
+planner olarak independent (P0) ya da cooperative (CA*) seçilebilir.
 Sipariş en yakın boştaki robota verilir.
 İlk warmup adımı metriklere katılmaz. stall_window adım boyunca hiç teslimat olmazsa
 tıkanma sayılır.
@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from .astar import find_path, manhattan, reconstruct_path
 from .conflicts import detect_conflicts
+from .cooperative import ReservationTable, plan_cooperative
 from .grid import Cell, Grid
 from .orders import Order
 from .warehouse import Warehouse
@@ -72,7 +73,7 @@ class Simulation:
     def __init__(self, warehouse: Warehouse, orders: list[Order], n_robots: int,
                  assign: Assigner, horizon: int = 1000, repair_after: int = 3,
                  warmup: int = 0, agitation: bool = True, seed: int = 0,
-                 stall_window: int = 200):
+                 stall_window: int = 200, planner: str = "independent"):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -85,13 +86,22 @@ class Simulation:
         self.use_agitation = agitation
         self.rng = random.Random(seed)
         self.stall_window = stall_window
+        if planner not in ("independent", "cooperative"):
+            raise ValueError(f"Bilinmeyen planlayıcı: {planner}")
+        self.cooperative = planner == "cooperative"
 
         # robotları park yerlerine eşit aralıklarla diz
         parks = warehouse.park_cells
         homes = [parks[i * len(parks) // n_robots] for i in range(n_robots)]
         self.robots = [Robot(i, h, h) for i, h in enumerate(homes)]
 
+        self.table = ReservationTable()
+        if self.cooperative:
+            for r in self.robots:
+                self.table.hold(r.id, r.pos, 0)    # boştaki robot park yerini süresiz tutar
+
         self.t = 0
+        self._now = 0          # robotların şu anki konumlarının ait olduğu zaman adımı
         self._next_order = 0
         self.open_orders: list[Order] = []
         self.completion_times: list[int] = []
@@ -105,6 +115,9 @@ class Simulation:
         self.in_stall = False
 
     def plan(self, robot: Robot, avoid: set[Cell] | None = None) -> None:
+        if self.cooperative:
+            self._plan_cooperative(robot)
+            return
         grid = self.grid
         if avoid:
             grid = Grid(grid.width, grid.height, grid.blocked | (avoid - {robot.target}))
@@ -113,6 +126,19 @@ class Simulation:
         else:
             path = find_path(grid, robot.pos, robot.target)
         robot.path = path[1:] if path else []
+
+    def _plan_cooperative(self, robot: Robot) -> None:
+        """Robotun eski rezervasyonlarını silip rezervasyon tablosuna göre yeniden planlar."""
+        self.table.release(robot.id)
+        stay = robot.phase in ("idle", "to_home")      # parka gidiyorsa hedefte süresiz kalacak
+        cells = plan_cooperative(self.grid, self.table, robot.id, robot.pos, self._now,
+                                 robot.target, stay_at_goal=stay)
+        if cells:
+            self.table.reserve_path(robot.id, cells, self._now, park_at_end=stay)
+            robot.path = cells[1:]
+        else:
+            self.table.hold(robot.id, robot.pos, self._now)   # yol yoksa yerinde bekler, sonra tekrar dener
+            robot.path = []
 
     def _noisy_path(self, grid: Grid, start: Cell, goal: Cell, noise: float) -> list[Cell] | None:
         """A*, ama hedefe mesafe tahminine [0, noise) arası rastgele sayı ekleniyor (agitation).
@@ -136,11 +162,13 @@ class Simulation:
         return None
 
     def step(self) -> None:
+        self._now = self.t
         self._release_orders()
         self._assign_orders()
 
         current = {r.id: r.pos for r in self.robots}
-        intended = {r.id: (r.path[0] if r.path else r.pos) for r in self.robots}
+        planned = {r.id: (r.path[0] if r.path else r.pos) for r in self.robots}
+        intended = dict(planned)
 
         conflicts = detect_conflicts(current, intended)
         self.conflicts += len(conflicts)
@@ -157,22 +185,35 @@ class Simulation:
             conflicts = detect_conflicts(current, intended)
 
         for r in self.robots:
-            if intended[r.id] != r.pos:
-                r.pos = intended[r.id]
+            moved = intended[r.id] != r.pos
+            on_task = r.phase in ("to_pick", "to_drop")
+            if r.path and intended[r.id] == planned[r.id]:
+                # plana uydu (planda bekleme adımı da olabilir)
                 r.path.pop(0)
-                r.distance += 1
                 r.blocked_for = 0
+                if not moved and on_task:
+                    r.task_waits += 1
             elif r.path:
                 # çakışma yüzünden plandaki hücreye gidemedi
                 r.blocked_for += 1
-                if r.phase in ("to_pick", "to_drop"):
+                if on_task:
                     r.task_waits += 1
+            r.pos = intended[r.id]
+            if moved:
+                r.distance += 1
 
+        self._now = self.t + 1
         for r in self.robots:
             self._advance(r)
 
         occupied = {r.pos for r in self.robots}
         for r in self.robots:
+            if self.cooperative:
+                if r.blocked_for > 0:          # plandan saptı, rezervasyonları artık geçersiz
+                    self.plan(r)
+                    r.blocked_for = 0
+                    self.repairs += 1
+                continue
             if r.blocked_for >= self.repair_after:
                 if self.use_agitation:
                     r.agitation += 1
