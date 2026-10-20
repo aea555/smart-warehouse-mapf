@@ -6,7 +6,7 @@ Her adımda sırasıyla şunlar olur.
 3. Robotlar hareket eder. Hedefe varan robot görevin sonraki aşamasına geçer.
 4. Birkaç adım ilerleyemeyen robot yolunu yeniden planlar (Local Repair).
 
-planner olarak independent (P0) ya da cooperative (CA*) seçilebilir.
+planner olarak independent (P0), cooperative (CA*) ya da windowed (WHCA*) seçilebilir.
 Sipariş en yakın boştaki robota verilir.
 İlk warmup adımı metriklere katılmaz. stall_window adım boyunca hiç teslimat olmazsa
 tıkanma sayılır.
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from .astar import find_path, manhattan, reconstruct_path
 from .conflicts import detect_conflicts
-from .cooperative import ReservationTable, plan_cooperative
+from .cooperative import DistanceMap, ReservationTable, plan_cooperative, plan_windowed
 from .grid import Cell, Grid
 from .orders import Order
 from .warehouse import Warehouse
@@ -73,7 +73,8 @@ class Simulation:
     def __init__(self, warehouse: Warehouse, orders: list[Order], n_robots: int,
                  assign: Assigner, horizon: int = 1000, repair_after: int = 3,
                  warmup: int = 0, agitation: bool = True, seed: int = 0,
-                 stall_window: int = 200, planner: str = "independent"):
+                 stall_window: int = 200, planner: str = "independent",
+                 window: int = 16, replan_every: int = 8):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -86,9 +87,13 @@ class Simulation:
         self.use_agitation = agitation
         self.rng = random.Random(seed)
         self.stall_window = stall_window
-        if planner not in ("independent", "cooperative"):
+        if planner not in ("independent", "cooperative", "windowed"):
             raise ValueError(f"Bilinmeyen planlayıcı: {planner}")
-        self.cooperative = planner == "cooperative"
+        self.planner = planner
+        self.cooperative = planner in ("cooperative", "windowed")   # rezervasyon tablosu kullanılıyor mu
+        self.window = window
+        self.replan_every = replan_every
+        self.dist = DistanceMap(self.grid)
 
         # robotları park yerlerine eşit aralıklarla diz
         parks = warehouse.park_cells
@@ -96,7 +101,7 @@ class Simulation:
         self.robots = [Robot(i, h, h) for i, h in enumerate(homes)]
 
         self.table = ReservationTable()
-        if self.cooperative:
+        if self.planner == "cooperative":
             for r in self.robots:
                 self.table.hold(r.id, r.pos, 0)    # boştaki robot park yerini süresiz tutar
 
@@ -115,6 +120,9 @@ class Simulation:
         self.in_stall = False
 
     def plan(self, robot: Robot, avoid: set[Cell] | None = None) -> None:
+        if self.planner == "windowed":
+            self._plan_windowed(robot)
+            return
         if self.cooperative:
             self._plan_cooperative(robot)
             return
@@ -139,6 +147,24 @@ class Simulation:
         else:
             self.table.hold(robot.id, robot.pos, self._now)   # yol yoksa yerinde bekler, sonra tekrar dener
             robot.path = []
+
+    def _plan_windowed(self, robot: Robot) -> None:
+        """Robotun eski rezervasyonlarını silip önümüzdeki ``window`` adımı planlar (WHCA*)."""
+        self.table.release(robot.id)
+        cells = plan_windowed(self.grid, self.table, robot.id, robot.pos, self._now,
+                              robot.target, self.window, self.dist)
+        if cells is None:
+            cells = [robot.pos, robot.pos]        # kıpırdayamıyorsa bir adım bekler, sonra tekrar dener
+        self.table.reserve_path(robot.id, cells, self._now, park_at_end=False)
+        robot.path = cells[1:]
+
+    def _replan_all(self) -> None:
+        """WHCA* için bütün robotları rastgele bir sırayla yeniden planlar."""
+        self.table = ReservationTable()
+        order = list(self.robots)
+        self.rng.shuffle(order)
+        for r in order:
+            self._plan_windowed(r)
 
     def _noisy_path(self, grid: Grid, start: Cell, goal: Cell, noise: float) -> list[Cell] | None:
         """A*, ama hedefe mesafe tahminine [0, noise) arası rastgele sayı ekleniyor (agitation).
@@ -165,6 +191,8 @@ class Simulation:
         self._now = self.t
         self._release_orders()
         self._assign_orders()
+        if self.planner == "windowed" and self.t % self.replan_every == 0:
+            self._replan_all()
 
         current = {r.id: r.pos for r in self.robots}
         planned = {r.id: (r.path[0] if r.path else r.pos) for r in self.robots}
@@ -260,8 +288,8 @@ class Simulation:
     def _advance(self, r: Robot) -> None:
         """Hedefine varan robotu görevinin sonraki aşamasına geçirir."""
         if r.pos != r.target:
-            if not r.path and r.phase != "idle":
-                self.plan(r)           # yolu yok, tekrar dene
+            if not r.path and (r.phase != "idle" or self.planner == "windowed"):
+                self.plan(r)           # yolu yok ya da pencere bitti
             return
         r.agitation = 0
         if r.phase == "to_pick":

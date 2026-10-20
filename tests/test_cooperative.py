@@ -5,7 +5,7 @@ import random
 import pytest
 
 from warehouse_mapf.assignment import greedy_assign
-from warehouse_mapf.cooperative import ReservationTable, plan_cooperative
+from warehouse_mapf.cooperative import DistanceMap, ReservationTable, plan_cooperative, plan_windowed
 from warehouse_mapf.grid import Grid
 from warehouse_mapf.orders import generate_orders
 from warehouse_mapf.sim import Simulation
@@ -59,11 +59,33 @@ def test_cannot_park_on_someones_future_path():
     assert path is None or len(path) - 1 > 10
 
 
+def test_windowed_plan_has_window_length_and_heads_to_goal():
+    path = plan_windowed(CORRIDOR, ReservationTable(), 0, (0, 0), 0, (4, 0), 6, DistanceMap(CORRIDOR))
+    assert len(path) == 7
+    assert path[:5] == [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]
+    assert path[5:] == [(4, 0), (4, 0)]          # hedefe vardıktan sonra orada bekler
+
+
+def test_windowed_robot_at_goal_steps_aside():
+    grid = Grid.from_text("""
+        ...
+        .#.
+    """)
+    table = ReservationTable()
+    # robot 1 (0,0)'dan (2,0)'a geçecek, yolu robot 0'ın durduğu (1,0)'dan geçiyor
+    table.reserve_path(1, [(0, 0), (1, 0), (2, 0)], 0, park_at_end=False)
+    path = plan_windowed(grid, table, 0, (1, 0), 0, (1, 0), 4, DistanceMap(grid))
+    assert path is not None
+    assert path[1] != (1, 0)                     # hedefinde olsa bile kenara çekilip yol verir
+    assert path[-1] == (1, 0)                    # sonra hedefine döner
+
+
+@pytest.mark.parametrize("planner", ["cooperative", "windowed"])
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_simulation_invariants(seed):
+def test_simulation_invariants(planner, seed):
     w = generate_warehouse()
     orders = generate_orders(w, 0.45, 400, random.Random(seed))
-    sim = Simulation(w, orders, 30, greedy_assign, horizon=400, planner="cooperative", seed=seed)
+    sim = Simulation(w, orders, 30, greedy_assign, horizon=400, planner=planner, seed=seed)
     for _ in range(400):
         before = [r.pos for r in sim.robots]
         sim.step()
