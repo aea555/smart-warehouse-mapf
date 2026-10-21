@@ -7,6 +7,9 @@ requires-python = ">=3.13"
 dependencies = []
 
 [dependency-groups]
+analysis = [
+    "matplotlib>=3.11.2",
+]
 dev = [
     "pytest>=8.0",
 ]

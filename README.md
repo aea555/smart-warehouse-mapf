@@ -23,19 +23,43 @@ uv run pytest   # testleri çalıştırır
 uv run python demo.py   # küçük bir haritada A* ile bulunan yolu ekrana çizer
 ```
 
-## Yöntem
+## Kullanılan algoritmalar
 
-Şimdilik sadece baseline var. Sipariş en yakın boştaki robota verilir ve her robot yolunu A* ile bulur.
-Robotlar diğer robotları hesaba katmaz. Bir robot önündeki robot yüzünden birkaç adım ilerleyemezse
-yolunu yeniden planlar (Local Repair A*).
+### A*
 
-## Deney
+Tek bir robot için en kısa yolu bulur. Diğer robotları hesaba katmaz. Robot önünde başka bir
+robot olduğu için ilerleyemezse yolunu yeniden planlar (Local Repair A*).
+
+### WHCA*
+
+Robotlar sırayla planlanır. Her robot hangi adımda hangi hücrede olacağını ortak bir tabloya
+(rezervasyon tablosu) yazar. Sonraki robot yolunu bulurken tablodaki dolu hücrelerden kaçınır. A*'dan
+farkı, robotların birbirinin nereden geçeceğini bilerek yol bulmasıdır. Yollar sadece önümüzdeki 16 adım
+için ayrılır ve 8 adımda bir yeniden planlanır.
+
+## Yöntemler
+
+1. Bağımsız A* yönteminde sipariş en yakın boştaki robota verilir. Her robot yolunu A* ile bulur.
+2. WHCA* yöntemi 1. yöntemle aynıdır, ama yollar WHCA* ile planlanır.
+
+Kodda ve sonuç dosyalarında bu yöntemler `P0` ve `P1` olarak geçer.
+
+## Deneyler
+
+Her simülasyon 1200 adım sürer. İlk 200 adım sonuçlara katılmaz. Aynı seed her yöntemde aynı
+siparişleri üretir.
 
 ```bash
-uv run python tools/run_experiments.py   # farklı yük ve raf yoğunluklarında baseline'ı çalıştırır
+uv run python tools/run_capacity.py                        # kapasite deneyi
+uv run --group analysis python tools/plot_capacity.py      # kapasite grafiği
+uv run python tools/run_experiments.py                     # ilk baseline deneyi
 ```
 
-Sonuçlar `results/experiments.csv` dosyasına yazılır. Aynı seed her çalıştırmada aynı siparişleri üretir.
+Kapasite deneyinde 10, 20 ve 30 robotla sipariş geliş hızı adım başına 0,1'den 1,2'ye kadar artırıldı.
+Yöntemlerin ne kadar sipariş tamamlayabildiğine bakıldı. Karşılaştırma için yolun tamamını ayıran
+Cooperative A* de denendi. Sonuçlar `results/capacity.csv` dosyasına yazılır.
+
+![Kapasite](docs/media/capacity.png)
 
 ## Unity
 
@@ -57,7 +81,7 @@ Tek robotun A* yolunu gösteren ilk sahne de duruyor. O sahne için `tools/expor
 
 1. Izgara modeli ve tek robot için A*
 2. Birden fazla robot ve basit görev atama (baseline)
-3. Robotların birbirinin yolunu bildiği planlama (Cooperative A*)
+3. Robotların birbirinin yolunu bildiği planlama (WHCA*)
 4. Açık artırma ile görev atama
 5. Unity ile görselleştirme
 6. Deneyler ve makale
