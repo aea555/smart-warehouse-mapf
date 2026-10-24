@@ -7,7 +7,8 @@ Her adımda sırasıyla şunlar olur.
 4. Birkaç adım ilerleyemeyen robot yolunu yeniden planlar (Local Repair).
 
 planner olarak independent (P0), cooperative (CA*) ya da windowed (WHCA*) seçilebilir.
-Sipariş en yakın boştaki robota verilir.
+allocation olarak greedy (en yakın boştaki robot) ya da auction (açık artırma) seçilebilir.
+Simülasyona koridor kapanması ve robot arızası olayları da eklenebilir.
 İlk warmup adımı metriklere katılmaz. stall_window adım boyunca hiç teslimat olmazsa
 tıkanma sayılır.
 """
@@ -20,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .astar import find_path, manhattan, reconstruct_path
+from .auction import Bidder, auction
 from .conflicts import detect_conflicts
 from .cooperative import DistanceMap, ReservationTable, plan_cooperative, plan_windowed
 from .grid import Cell, Grid
@@ -27,6 +29,15 @@ from .orders import Order
 from .warehouse import Warehouse
 
 Assigner = Callable[[dict[int, Cell], list[Order]], dict[int, int]]
+
+
+@dataclass(frozen=True)
+class Event:
+    kind: str                          # "block" ya da "fail"
+    start: int
+    duration: int
+    cells: tuple[Cell, ...] = ()       # block olayında kapanan hücreler
+    count: int = 0                     # fail olayında arızalanacak robot sayısı (o an görevde olanlardan rastgele seçilir)
 
 
 @dataclass
@@ -41,6 +52,11 @@ class Robot:
     distance: int = 0
     task_waits: int = 0            # sipariş taşırken beklediği adım sayısı
     agitation: int = 0             # Local Repair'de yol aramasına eklenen gürültü miktarı
+    next_order: Order | None = None    # açık artırmada kazanılmış sıradaki iş
+    failed_until: int = -1             # bu adıma kadar arızalı
+
+    def failed(self, t: int) -> bool:
+        return t < self.failed_until
 
     @property
     def target(self) -> Cell:
@@ -74,7 +90,9 @@ class Simulation:
                  assign: Assigner, horizon: int = 1000, repair_after: int = 3,
                  warmup: int = 0, agitation: bool = True, seed: int = 0,
                  stall_window: int = 200, planner: str = "independent",
-                 window: int = 16, replan_every: int = 8):
+                 window: int = 16, replan_every: int = 8,
+                 allocation: str = "greedy", reauction_every: int = 10,
+                 events: tuple[Event, ...] = (), event_replan: bool = False):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -93,6 +111,15 @@ class Simulation:
         self.cooperative = planner in ("cooperative", "windowed")   # rezervasyon tablosu kullanılıyor mu
         self.window = window
         self.replan_every = replan_every
+        if allocation not in ("greedy", "auction"):
+            raise ValueError(f"Bilinmeyen atama: {allocation}")
+        self.allocation = allocation
+        self.reauction_every = reauction_every
+        self.events = sorted(events, key=lambda e: e.start)
+        self.event_replan = event_replan
+        self.event_rng = random.Random(seed + 7919)   # arızalanacak robotların seçimi
+        self.static_grid = warehouse.grid
+        self.temp_blocked: set[Cell] = set()
         self.dist = DistanceMap(self.grid)
 
         # robotları park yerlerine eşit aralıklarla diz
@@ -110,6 +137,7 @@ class Simulation:
         self._next_order = 0
         self.open_orders: list[Order] = []
         self.completion_times: list[int] = []
+        self.completion_steps: list[int] = []       # her teslimatın yapıldığı adım (zaman serisi için)
         self.task_waits_done = 0
         self.conflicts = 0
         self.repairs = 0
@@ -120,6 +148,9 @@ class Simulation:
         self.in_stall = False
 
     def plan(self, robot: Robot, avoid: set[Cell] | None = None) -> None:
+        if robot.failed(self._now):
+            self._hold_failed(robot)
+            return
         if self.planner == "windowed":
             self._plan_windowed(robot)
             return
@@ -134,6 +165,21 @@ class Simulation:
         else:
             path = find_path(grid, robot.pos, robot.target)
         robot.path = path[1:] if path else []
+
+    def _hold_failed(self, robot: Robot) -> None:
+        """Arızalı robot yerinde durur. Rezervasyon tablosu varsa hücresini tutar."""
+        robot.path = []
+        if self.planner == "windowed":
+            self.table.release(robot.id)
+            self.table.reserve_path(robot.id, [robot.pos] * (self.window + 1), self._now, park_at_end=False)
+        elif self.planner == "cooperative":
+            self.table.release(robot.id)
+            self.table.hold(robot.id, robot.pos, self._now)
+
+    def _rebuild_grid(self) -> None:
+        g = self.static_grid
+        self.grid = Grid(g.width, g.height, g.blocked | self.temp_blocked)
+        self.dist = DistanceMap(self.grid)
 
     def _plan_cooperative(self, robot: Robot) -> None:
         """Robotun eski rezervasyonlarını silip rezervasyon tablosuna göre yeniden planlar."""
@@ -189,14 +235,18 @@ class Simulation:
 
     def step(self) -> None:
         self._now = self.t
+        self._process_events()
         self._release_orders()
         self._assign_orders()
         if self.planner == "windowed" and self.t % self.replan_every == 0:
             self._replan_all()
 
         current = {r.id: r.pos for r in self.robots}
-        planned = {r.id: (r.path[0] if r.path else r.pos) for r in self.robots}
+        planned = {r.id: (r.path[0] if r.path and not r.failed(self.t) else r.pos) for r in self.robots}
         intended = dict(planned)
+        for rid, cell in intended.items():
+            if cell in self.temp_blocked and cell != current[rid]:
+                intended[rid] = current[rid]          # kapalı koridora giremez
 
         conflicts = detect_conflicts(current, intended)
         self.conflicts += len(conflicts)
@@ -232,10 +282,13 @@ class Simulation:
 
         self._now = self.t + 1
         for r in self.robots:
-            self._advance(r)
+            if not r.failed(self._now):
+                self._advance(r)
 
         occupied = {r.pos for r in self.robots}
         for r in self.robots:
+            if r.failed(self._now):
+                continue
             if self.cooperative:
                 if r.blocked_for > 0:          # plandan saptı, rezervasyonları artık geçersiz
                     self.plan(r)
@@ -252,6 +305,46 @@ class Simulation:
         self._track_stall()
 
         self.t += 1
+
+    def _process_events(self) -> None:
+        t = self.t
+        for e in self.events:
+            if e.kind == "block" and e.start == t:
+                self.temp_blocked |= set(e.cells)
+                self._rebuild_grid()
+                if self.event_replan:
+                    for r in self.robots:
+                        if not r.failed(t) and set(r.path) & set(e.cells):
+                            self.plan(r)
+            elif e.kind == "block" and e.start + e.duration == t:
+                self.temp_blocked -= set(e.cells)
+                self._rebuild_grid()
+                if self.event_replan:
+                    self._replan_everyone()
+            elif e.kind == "fail" and e.start == t:
+                busy = [r for r in self.robots if r.phase in ("to_pick", "to_drop") and not r.failed(t)]
+                chosen = self.event_rng.sample(busy, min(e.count, len(busy)))
+                for r in chosen:
+                    r.failed_until = t + e.duration
+                    self._hold_failed(r)
+                if self.allocation == "auction":
+                    self._auction(reauction=True)       # arızalı robotun işi yeniden açık artırmaya çıkar
+                if self.event_replan:
+                    stuck = {r.pos for r in chosen}
+                    for r in self.robots:
+                        if not r.failed(t) and set(r.path) & stuck:
+                            self.plan(r)
+        for r in self.robots:
+            if r.failed_until == t:                     # arıza bitti
+                self.plan(r)
+
+    def _replan_everyone(self) -> None:
+        if self.planner == "windowed":
+            self._replan_all()
+        else:
+            for r in self.robots:
+                if r.phase != "idle" or r.pos != r.home:
+                    self.plan(r)
 
     def _track_stall(self) -> None:
         if self.t < self.warmup:
@@ -271,9 +364,13 @@ class Simulation:
             self._next_order += 1
 
     def _assign_orders(self) -> None:
+        if self.allocation == "auction":
+            self._auction(reauction=self.t % self.reauction_every == 0)
+            return
         if not self.open_orders:
             return
-        available = {r.id: r.pos for r in self.robots if r.phase in ("idle", "to_home")}
+        available = {r.id: r.pos for r in self.robots
+                     if r.phase in ("idle", "to_home") and not r.failed(self.t)}
         if not available:
             return
         assignment = self.assign(available, list(self.open_orders))
@@ -284,6 +381,63 @@ class Simulation:
             robot.phase = "to_pick"
             self.plan(robot)
             self.open_orders.remove(robot.order)
+
+    def _auction(self, reauction: bool) -> None:
+        """Bekleyen siparişleri açık artırmayla dağıtır.
+
+        reauction ise robotların henüz rafa varmadığı siparişler de geri alınıp yeniden açık artırmaya çıkar.
+        """
+        now = self._now
+        pool = list(self.open_orders)
+        previous: dict[int, int] = {}       # sipariş id -> açık artırmadan önceki robotu
+        released: set[int] = set()
+        if reauction:
+            for r in self.robots:
+                if r.phase == "to_pick" and r.order is not None:
+                    previous[r.order.id] = r.id
+                    pool.append(r.order)
+                    r.order = None
+                    released.add(r.id)
+                if r.next_order is not None:
+                    previous[r.next_order.id] = r.id
+                    pool.append(r.next_order)
+                    r.next_order = None
+        if not pool:
+            return
+
+        bidders: list[Bidder] = []
+        for r in self.robots:
+            if r.failed(now):
+                continue
+            if r.id in released or r.phase in ("idle", "to_home"):
+                bidders.append(Bidder(r.id, 0, r.pos, 2))
+            elif r.next_order is None and r.order is not None:
+                if r.phase == "to_drop":
+                    free_in = self.dist(r.pos, r.order.drop)
+                else:
+                    free_in = self.dist(r.pos, r.order.pick) + self.dist(r.order.pick, r.order.drop)
+                bidders.append(Bidder(r.id, free_in, r.order.drop, 1))
+
+        pool.sort(key=lambda o: (o.arrival, o.id))
+        candidates = pool[:max(1, 2 * len(bidders))]
+        by_id = {o.id: o for o in candidates}
+        assigned: set[int] = set()
+        for order_id, robot_id in auction(bidders, candidates, self.dist):
+            r, o = self.robots[robot_id], by_id[order_id]
+            assigned.add(order_id)
+            if r.order is None:                     # boştaki robot hemen bu işe başlar
+                r.order = o
+                r.phase = "to_pick"
+                if previous.get(order_id) != robot_id:
+                    self.plan(r)
+            else:                                   # meşgul robot bunu sıradaki işi olarak alır
+                r.next_order = o
+        for rid in released:
+            r = self.robots[rid]
+            if r.order is None:                     # işini kaybetti, yeni iş de almadı
+                r.phase = "to_home"
+                self.plan(r)
+        self.open_orders = [o for o in pool if o.id not in assigned]
 
     def _advance(self, r: Robot) -> None:
         """Hedefine varan robotu görevinin sonraki aşamasına geçirir."""
@@ -297,11 +451,16 @@ class Simulation:
             self.plan(r)
         elif r.phase == "to_drop":
             self.completion_times.append(self.t + 1 - r.order.arrival)
+            self.completion_steps.append(self.t)
             self._last_completion = self.t
             self.task_waits_done += r.task_waits
             r.task_waits = 0
-            r.order = None
-            r.phase = "to_home"
+            if r.next_order is not None:        # açık artırmada kazanılmış sıradaki iş
+                r.order, r.next_order = r.next_order, None
+                r.phase = "to_pick"
+            else:
+                r.order = None
+                r.phase = "to_home"
             self.plan(r)
         elif r.phase == "to_home":
             r.phase = "idle"
