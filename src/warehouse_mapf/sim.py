@@ -18,7 +18,7 @@ from __future__ import annotations
 import heapq
 import random
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .astar import find_path, manhattan, reconstruct_path
 from .auction import Bidder, auction
@@ -92,7 +92,8 @@ class Simulation:
                  stall_window: int = 200, planner: str = "independent",
                  window: int = 16, replan_every: int = 8,
                  allocation: str = "greedy", reauction_every: int = 10,
-                 events: tuple[Event, ...] = (), event_replan: bool = False):
+                 events: tuple[Event, ...] = (), event_replan: bool = False,
+                 station=None):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -117,6 +118,7 @@ class Simulation:
         self.reauction_every = reauction_every
         self.events = sorted(events, key=lambda e: e.start)
         self.event_replan = event_replan
+        self.station = station          # paketleme istasyonu seçici (stations.py), None ise siparişteki istasyon kullanılır
         self.event_rng = random.Random(seed + 7919)   # arızalanacak robotların seçimi
         self.static_grid = warehouse.grid
         self.temp_blocked: set[Cell] = set()
@@ -447,11 +449,16 @@ class Simulation:
             return
         r.agitation = 0
         if r.phase == "to_pick":
+            if self.station is not None:      # istasyon ürün alınınca seçilir
+                i = self.station.choose(self, r)
+                r.order = replace(r.order, drop=self.warehouse.drop_cells[i])
             r.phase = "to_drop"
             self.plan(r)
         elif r.phase == "to_drop":
             self.completion_times.append(self.t + 1 - r.order.arrival)
             self.completion_steps.append(self.t)
+            if self.station is not None:
+                self.station.on_delivery(r.id, self.t)
             self._last_completion = self.t
             self.task_waits_done += r.task_waits
             r.task_waits = 0
