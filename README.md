@@ -37,12 +37,20 @@ Robotlar sırayla planlanır. Her robot hangi adımda hangi hücrede olacağın�
 farkı, robotların birbirinin nereden geçeceğini bilerek yol bulmasıdır. Yollar sadece önümüzdeki 16 adım
 için ayrılır ve 8 adımda bir yeniden planlanır.
 
+### Açık artırma
+
+Her sipariş için robotlar teklif verir. Teklif, robotun elindeki işi bitirmesine kalan
+süre ile işi bitirdiği yerden rafa olan mesafenin toplamıdır. En düşük teklifi veren robot siparişi alır.
+Sonra kalan siparişler için açık artırma tekrarlanır.
+
 ## Yöntemler
 
 1. Bağımsız A* yönteminde sipariş en yakın boştaki robota verilir. Her robot yolunu A* ile bulur.
 2. WHCA* yöntemi 1. yöntemle aynıdır, ama yollar WHCA* ile planlanır.
+3. WHCA* + açık artırma yönteminde siparişler açık artırmayla dağıtılır. Bir koridor kapanınca ya da robot
+   arızalanınca, yolu etkilenen robotlar 8 adımı beklemeden hemen yeniden planlanır.
 
-Kodda ve sonuç dosyalarında bu yöntemler `P0` ve `P1` olarak geçer.
+Kodda ve sonuç dosyalarında bu yöntemler `P0`, `P1` ve `P2` olarak geçer.
 
 ## Deneyler
 
@@ -52,6 +60,9 @@ siparişleri üretir.
 ```bash
 uv run python tools/run_capacity.py                        # kapasite deneyi
 uv run --group analysis python tools/plot_capacity.py      # kapasite grafiği
+uv run python tools/run_rq2.py                             # koridor kapanması ve robot arızası
+uv run --group analysis python tools/plot_rq2.py           # olay deneyinin grafiği
+uv run python tools/run_sensitivity.py                     # WHCA* pencere boyu denemesi
 uv run python tools/run_experiments.py                     # ilk baseline deneyi
 ```
 
@@ -60,6 +71,11 @@ Yöntemlerin ne kadar sipariş tamamlayabildiğine bakıldı. Karşılaştırma 
 Cooperative A* de denendi. Sonuçlar `results/capacity.csv` dosyasına yazılır.
 
 ![Kapasite](docs/media/capacity.png)
+
+Olay deneyinde 500. adımda ya bir koridor kapanır ya da 5 robot arızalanır. Olay 300 adım sürer.
+Bu sırada ve sonrasında yöntemlerin ne kadar sipariş tamamladığına bakıldı.
+
+![RQ2](docs/media/rq2.png)
 
 ## Unity
 
