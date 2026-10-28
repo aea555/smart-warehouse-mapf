@@ -1,6 +1,7 @@
 """Öğrenen istasyon seçiciyi eğitir. Karşılaştırdığımız kuralın alpha'sını da burada seçer.
 
-    uv run python tools/train_station.py
+    uv run python tools/train_station.py              # v1
+    uv run python tools/train_station.py --extended   # v1x, birkaç durum özelliği daha var
 
 Önce 1000-1039 seed'leriyle eğitim yapılır. Ajan ε-greedy seçimle veri toplar ve her simülasyondan
 sonra model yeniden eğitilir. Sonra 2000-2009 seed'leriyle ridge katsayısı ve kuralın alpha'sı seçilir.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import sys
 from pathlib import Path
 
 from warehouse_mapf.assignment import greedy_assign
@@ -50,11 +52,15 @@ def validate(make_station) -> dict:
     return {"throughput": sum(thr) / len(thr), "completion_time": sum(ct) / len(ct)}
 
 
+EXTENDED = "--extended" in sys.argv       # v1x'te ödül aynı, duruma yoldaki robotlar ve genel yük eklenir
+SUFFIX = "_v1x" if EXTENDED else ""
+
+
 def main() -> None:
     log = []
 
     # 1) eğitim, ε 0,3'ten 0,05'e iner
-    agent = LearnedStation(epsilon=0.3, seed=1)
+    agent = LearnedStation(epsilon=0.3, seed=1, extended=EXTENDED)
     for k, seed in enumerate(TRAIN_SEEDS):
         agent.epsilon = max(0.05, 0.3 * (1 - k / len(TRAIN_SEEDS)))
         rate = RATES[k % len(RATES)]
@@ -71,7 +77,7 @@ def main() -> None:
     for ridge in RIDGES:
         agent.ridge = ridge
         agent.fit()
-        frozen = LearnedStation(epsilon=0.0)
+        frozen = LearnedStation(epsilon=0.0, extended=EXTENDED)
         frozen.weights, frozen.mean, frozen.std = agent.weights, agent.mean, agent.std
         res = validate(lambda: _copy(frozen))
         log.append({"stage": "val-learned", "ridge": ridge, **res})
@@ -80,7 +86,10 @@ def main() -> None:
             best = (res, ridge)
     agent.ridge = best[1]
     agent.fit()
-    agent.save(ROOT / "models" / "station_policy.json")
+    agent.save(ROOT / "models" / f"station_policy{SUFFIX}.json")
+    if EXTENDED:
+        print(f"seçilen ridge={best[1]}")
+        return
 
     # 3) kuralın alpha'sı doğrulama seed'leriyle seçilir
     best_alpha = None
@@ -93,7 +102,7 @@ def main() -> None:
     (ROOT / "models" / "station_rule.json").write_text(json.dumps({"alpha": best_alpha[1]}))
 
     keys = sorted({k for row in log for k in row})
-    with (ROOT / "results" / "station_training.csv").open("w", newline="") as f:
+    with (ROOT / "results" / f"station_training{SUFFIX}.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
         writer.writerows(log)
@@ -101,7 +110,7 @@ def main() -> None:
 
 
 def _copy(agent: LearnedStation) -> LearnedStation:
-    c = LearnedStation(epsilon=0.0)
+    c = LearnedStation(epsilon=0.0, extended=agent.extended)
     c.weights, c.mean, c.std = agent.weights, agent.mean, agent.std
     return c
 

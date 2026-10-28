@@ -8,7 +8,8 @@ Karşılaştırılan istasyon seçiciler şunlar.
   random       siparişle birlikte gelen rastgele istasyon
   nearest      en yakın istasyon
   rule         kural tabanlı, alpha doğrulamada seçildi (models/station_rule.json)
-  learned      robotun kendi teslim süresinden öğrenir (models/station_policy.json)
+  learned      v1, robotun kendi teslim süresinden öğrenir (models/station_policy.json)
+  learned-v1x  v1'e birkaç durum özelliği eklenmiş hali (models/station_policy_v1x.json)
 Sonuçlar results/station_test.csv dosyasına yazılır.
 """
 
@@ -33,7 +34,7 @@ DENSITY = "medium"
 ROBOTS = [20, 30]
 RATES = [0.45, 0.6, 0.8]
 TEST_SEEDS = range(30)
-SELECTORS = ["random", "nearest", "rule", "learned"]
+SELECTORS = ["random", "nearest", "rule", "learned", "learned-v1x"]
 
 
 def make(selector: str):
@@ -43,6 +44,8 @@ def make(selector: str):
         return NearestStation()
     if selector == "rule":
         return QueueAwareStation(json.loads((ROOT / "models" / "station_rule.json").read_text())["alpha"])
+    if selector == "learned-v1x":
+        return LearnedStation.load(ROOT / "models" / "station_policy_v1x.json")
     return LearnedStation.load(ROOT / "models" / "station_policy.json")
 
 

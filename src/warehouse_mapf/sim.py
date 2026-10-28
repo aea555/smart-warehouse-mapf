@@ -307,6 +307,9 @@ class Simulation:
         self._track_stall()
 
         self.t += 1
+        hook = getattr(self.station, "after_step", None)    # sadece RolloutLabeler'da var
+        if hook is not None:
+            hook(self)
 
     def _process_events(self) -> None:
         t = self.t

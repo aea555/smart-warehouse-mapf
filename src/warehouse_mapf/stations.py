@@ -9,8 +9,10 @@ Simulation'da station=None ise siparişte yazan istasyon kullanılır.
 
 from __future__ import annotations
 
+import copy
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,6 +43,30 @@ def station_features(sim: Simulation, robot: Robot) -> list[list[float]]:
             if abs(other.pos[0] - drop[0]) + abs(other.pos[1] - drop[1]) <= CROWD_RADIUS:
                 crowd += 1
         rows.append([float(d), float(ahead), float(inbound), float(crowd)])
+    return rows
+
+
+def _route(sim: Simulation, start: Cell, goal: Cell) -> list[Cell]:
+    """Mesafesi azalan komşuya adım adım giderek en kısa yolu çıkarır (robotlar yok sayılır)."""
+    path, cell = [], start
+    d = sim.dist(cell, goal)
+    while cell != goal and d < 10**6:
+        nxt = min(sim.grid.neighbors(cell), key=lambda n: sim.dist(n, goal), default=None)
+        if nxt is None or sim.dist(nxt, goal) >= d:
+            break
+        cell, d = nxt, sim.dist(nxt, goal)
+        path.append(cell)
+    return path
+
+
+def station_features_v2(sim: Simulation, robot: Robot) -> list[list[float]]:
+    """station_features + [istasyona giden yoldaki robot sayısı, bekleyen sipariş / 10]."""
+    occupied = {r.pos for r in sim.robots if r.id != robot.id}
+    load = len(sim.open_orders) / 10.0
+    rows = station_features(sim, robot)
+    for row, drop in zip(rows, sim.warehouse.drop_cells):
+        on_route = sum(1 for c in _route(sim, robot.pos, drop) if c in occupied)
+        row.extend([float(on_route), load])
     return rows
 
 
@@ -85,7 +111,10 @@ class LearnedStation:
     """
     name = "learned"
 
-    def __init__(self, epsilon: float = 0.0, seed: int = 0, ridge: float = 1.0):
+    def __init__(self, epsilon: float = 0.0, seed: int = 0, ridge: float = 1.0,
+                 extended: bool = False, maximize: bool = False):
+        self.extended = extended          # station_features_v2 kullanılsın mı
+        self.maximize = maximize          # True ise rollout değeri en büyük olan, False ise süresi en kısa olan seçilir
         self.epsilon = epsilon
         self.rng = random.Random(seed)
         self.ridge = ridge
@@ -96,19 +125,22 @@ class LearnedStation:
         self.y: list[float] = []                   # gerçekleşen teslimat süresi
         self._pending: dict[int, tuple[np.ndarray, int]] = {}
 
+    def features(self, sim: Simulation, robot: Robot) -> list[list[float]]:
+        return station_features_v2(sim, robot) if self.extended else station_features(sim, robot)
+
     def predict(self, feats: list[list[float]]) -> np.ndarray:
         X = np.array([_poly(f) for f in feats])
         if self.weights is None:
-            return X[:, 1]   # model yoksa sadece mesafeye bak
+            return -X[:, 1] if self.maximize else X[:, 1]    # model yoksa sadece mesafeye bak
         return ((X - self.mean) / self.std) @ self.weights
 
     def choose(self, sim: Simulation, robot: Robot) -> int:
-        feats = station_features(sim, robot)
+        feats = self.features(sim, robot)
         if self.rng.random() < self.epsilon:
             i = self.rng.randrange(len(feats))
         else:
             pred = self.predict(feats)
-            i = int(np.argmin(pred))
+            i = int(np.argmax(pred) if self.maximize else np.argmin(pred))
         self._pending[robot.id] = (_poly(feats[i]), sim.t)
         return i
 
@@ -133,12 +165,13 @@ class LearnedStation:
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"weights": self.weights.tolist(), "mean": self.mean.tolist(),
-                                    "std": self.std.tolist(), "samples": len(self.y)}, indent=1))
+                                    "std": self.std.tolist(), "samples": len(self.y),
+                                    "extended": self.extended, "maximize": self.maximize}, indent=1))
 
     @classmethod
     def load(cls, path: Path) -> LearnedStation:
         data = json.loads(path.read_text())
-        agent = cls(epsilon=0.0)
+        agent = cls(epsilon=0.0, extended=data.get("extended", False), maximize=data.get("maximize", False))
         agent.weights = np.array(data["weights"])
         agent.mean = np.array(data["mean"])
         agent.std = np.array(data["std"])
@@ -147,3 +180,70 @@ class LearnedStation:
 
 def drop_cell(sim: Simulation, index: int) -> Cell:
     return sim.warehouse.drop_cells[index]
+
+
+class RolloutLabeler:
+    """Rollout ile eğitim verisi toplar.
+
+    1. Kararları kural verir, epsilon olasılıkla rastgele istasyon seçilir.
+    2. Kararların bir kısmında simülasyon her istasyon için kopyalanır, horizon adım ilerletilir.
+    3. Etiket = bu sürede yapılan teslimat sayısı - 0.02 * teslimata giden robotların kalan yolu.
+
+    Kopyaların hepsi aynı durumdan başladığı için aradaki fark sadece bu karardan gelir.
+    """
+    name = "rollout-labeler"
+
+    def __init__(self, alpha: float = 2.0, epsilon: float = 0.1, sample: float = 0.25,
+                 horizon: int = 60, seed: int = 0):
+        self.rule = QueueAwareStation(alpha)
+        self.epsilon = epsilon
+        self.sample = sample
+        self.horizon = horizon
+        self.rng = random.Random(seed)
+        self.X: list[np.ndarray] = []
+        self.y: list[float] = []
+        self._pending: list[tuple[int, list[list[float]]]] = []
+
+    def choose(self, sim: Simulation, robot: Robot) -> int:
+        if self.rng.random() < self.sample:
+            self._pending.append((robot.id, station_features_v2(sim, robot)))
+        if self.rng.random() < self.epsilon:
+            return self.rng.randrange(len(sim.warehouse.drop_cells))
+        return self.rule.choose(sim, robot)
+
+    def on_delivery(self, robot_id: int, t: int) -> None:
+        pass
+
+    def after_step(self, sim: Simulation) -> None:
+        pending, self._pending = self._pending, []
+        for robot_id, feats in pending:
+            values = self._rollouts(sim, robot_id)
+            if values is None:
+                continue
+            for f, v in zip(feats, values):
+                self.X.append(_poly(f))
+                self.y.append(v)
+
+    def _rollouts(self, sim: Simulation, robot_id: int) -> list[float] | None:
+        robot = sim.robots[robot_id]
+        if robot.phase != "to_drop" or robot.order is None:
+            return None
+        shared = {id(x): x for x in (sim.warehouse, sim.static_grid, sim.grid, sim.dist, sim.orders)}
+        shared[id(self)] = None
+        base_station, sim.station = sim.station, self.rule      # kopyalarda kural karar verir
+        values = []
+        for drop in sim.warehouse.drop_cells:
+            clone = copy.deepcopy(sim, dict(shared))
+            r = clone.robots[robot_id]
+            r.order = replace(r.order, drop=drop)
+            clone._now = clone.t
+            clone.plan(r)
+            before = len(clone.completion_steps)
+            for _ in range(self.horizon):
+                clone.step()
+            delivered = len(clone.completion_steps) - before
+            remaining = sum(clone.dist(x.pos, x.order.drop) for x in clone.robots
+                            if x.phase == "to_drop" and x.order is not None)
+            values.append(delivered - 0.02 * remaining)
+        sim.station = base_station
+        return values
