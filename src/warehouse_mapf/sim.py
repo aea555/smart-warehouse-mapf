@@ -93,7 +93,7 @@ class Simulation:
                  window: int = 16, replan_every: int = 8,
                  allocation: str = "greedy", reauction_every: int = 10,
                  events: tuple[Event, ...] = (), event_replan: bool = False,
-                 station=None):
+                 station=None, priority=None):
         if n_robots > len(warehouse.park_cells):
             raise ValueError(f"En fazla {len(warehouse.park_cells)} robot sığar")
         self.warehouse = warehouse
@@ -119,6 +119,7 @@ class Simulation:
         self.events = sorted(events, key=lambda e: e.start)
         self.event_replan = event_replan
         self.station = station          # paketleme istasyonu seçici (stations.py), None ise siparişteki istasyon kullanılır
+        self.priority = priority        # WHCA* öncelik sırası (priority.py), None ise rastgele
         self.event_rng = random.Random(seed + 7919)   # arızalanacak robotların seçimi
         self.static_grid = warehouse.grid
         self.temp_blocked: set[Cell] = set()
@@ -207,10 +208,13 @@ class Simulation:
         robot.path = cells[1:]
 
     def _replan_all(self) -> None:
-        """WHCA* için bütün robotları rastgele bir sırayla yeniden planlar."""
+        """WHCA* için bütün robotları öncelik sırasıyla yeniden planlar."""
         self.table = ReservationTable()
-        order = list(self.robots)
-        self.rng.shuffle(order)
+        if self.priority is None:
+            order = list(self.robots)
+            self.rng.shuffle(order)
+        else:
+            order = self.priority.order(self)
         for r in order:
             self._plan_windowed(r)
 
