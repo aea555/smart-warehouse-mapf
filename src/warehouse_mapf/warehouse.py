@@ -54,3 +54,44 @@ def generate_warehouse(width: int = 36, height: int = 21, density: str = "medium
         if grid.is_free((x, y + dy)) and (x, y + dy) not in reserved
     })
     return Warehouse(grid, pick_cells, drop_cells, park_cells)
+
+
+def load_movingai(path, stations_per_side: int = 4, park_step: int = 3) -> Warehouse:
+    """MovingAI'daki warehouse haritalarından birini okuyup depo kurar.
+
+    İstasyonlar sol ve sağ duvarda. Toplama hücreleri rafların hemen altı ve üstü.
+    Park yerleri rafların iki yanındaki boş alanda, park_step hücre aralıkla.
+    """
+    from pathlib import Path
+
+    lines = Path(path).read_text().splitlines()
+    height = int(lines[1].split()[1])
+    width = int(lines[2].split()[1])
+    rows = lines[4:4 + height]
+    blocked = {(x, y) for y, row in enumerate(rows) for x, ch in enumerate(row[:width]) if ch not in ".G"}
+
+    # raflar, dış duvar hariç en soldaki ve en sağdaki engelin arasında
+    inner = [x for (x, y) in blocked if 0 < x < width - 1 and 0 < y < height - 1]
+    shelf_left, shelf_right = min(inner), max(inner)
+
+    step = (height - 2) // (stations_per_side + 1)
+    station_rows = [1 + step * (i + 1) for i in range(stations_per_side)]
+    stations = {(0, y) for y in station_rows} | {(width - 1, y) for y in station_rows}
+    drop_cells = sorted([(1, y) for y in station_rows] + [(width - 2, y) for y in station_rows])
+
+    park_cells = sorted(
+        (x, y)
+        for y in range(2, height - 2, park_step)
+        for x in [*range(4, shelf_left - 2, park_step), *range(shelf_right + 3, width - 4, park_step)]
+        if (x, y) not in blocked
+    )
+    grid = Grid(width, height, blocked)
+    reserved = set(park_cells) | set(drop_cells)
+    pick_cells = sorted({
+        (x, y + dy)
+        for (x, y) in blocked
+        if shelf_left <= x <= shelf_right and 0 < y < height - 1
+        for dy in (-1, 1)
+        if grid.is_free((x, y + dy)) and (x, y + dy) not in reserved
+    })
+    return Warehouse(grid, pick_cells, drop_cells, park_cells)
