@@ -2,7 +2,7 @@
 
     uv run --group analysis python tools/plot_rq2.py
 
-Her panel bir yük ve bir senaryo. Çizgiler 10 seed'in ortalaması. Gri bant olayın sürdüğü aralık.
+Her panel bir yük ve bir senaryo. Çizgiler 30 seed'in ortalaması. Gri bant olayın sürdüğü aralık.
 Grafik docs/media/rq2.png dosyasına kaydedilir.
 """
 
@@ -28,6 +28,8 @@ STYLE = {
     "P1+replan": ("P1 + olay anında yeniden planlama", "#9a8c98", "--"),
     "P2-auction": ("WHCA* + açık artırma", "#2e86ab", "--"),
     "P2": ("P2: açık artırma + yeniden planlama", "#2e86ab", "-"),
+    "P3-rule": ("P3-kural: + istasyon ve öncelik kuralı", "#66a182", "--"),
+    "P3": ("P3: + öğrenen istasyon ve öncelik", "#3d2b56", "-"),
 }
 SCENARIOS = {"block": "Koridor blokajı", "fail": "5 robot arızası", "both": "Blokaj + arıza"}
 
@@ -57,7 +59,7 @@ def main() -> None:
             if i == len(rates) - 1:
                 ax.set_xlabel("Adım (gri bant: olay süresi)")
     axes[0][0].legend(fontsize=8, loc="lower left")
-    fig.suptitle("RQ2: olay altında throughput (30 robot, 10 seed ortalaması)", fontsize=13)
+    fig.suptitle("RQ2: olay altında throughput (30 robot, 30 seed ortalaması)", fontsize=13)
     fig.tight_layout()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT, dpi=150)
