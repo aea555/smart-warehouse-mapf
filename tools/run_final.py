@@ -18,7 +18,6 @@ Sonuçlar results/final.csv dosyasına yazılır (tek düzen verilirse results/f
 from __future__ import annotations
 
 import csv
-import json
 import random
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -26,13 +25,10 @@ from dataclasses import asdict
 from functools import cache
 from pathlib import Path
 
-import numpy as np
-
 from warehouse_mapf.assignment import greedy_assign
 from warehouse_mapf.orders import generate_orders
-from warehouse_mapf.priority import LinearPriority, heuristic
+from warehouse_mapf.policies import POLICIES, policy_options
 from warehouse_mapf.sim import Simulation
-from warehouse_mapf.stations import LearnedStation, QueueAwareStation
 from warehouse_mapf.warehouse import generate_warehouse, load_movingai
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,7 +41,6 @@ LAYOUTS = {
     "high":     ([10, 20, 30], [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0, 1.2], range(30)),
     "movingai": ([50, 100], [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5], range(10)),
 }
-POLICIES = ["P0", "P1", "P2", "P3-rule", "P3"]
 
 
 @cache
@@ -55,28 +50,12 @@ def warehouse(layout: str):
     return generate_warehouse(density=layout)
 
 
-def options(policy: str) -> dict:
-    if policy == "P0":
-        return {}
-    if policy == "P1":
-        return {"planner": "windowed"}
-    p2 = {"planner": "windowed", "allocation": "auction", "event_replan": True}
-    if policy == "P2":
-        return p2
-    if policy == "P3-rule":
-        alpha = json.loads((ROOT / "models" / "station_rule.json").read_text())["alpha"]
-        return {**p2, "station": QueueAwareStation(alpha), "priority": heuristic("carrying-first")}
-    data = json.loads((ROOT / "models" / "priority_policy.json").read_text())
-    priority = LinearPriority(np.array(data["weights"]) / np.array(data["scale"]), name="learned")
-    return {**p2, "station": LearnedStation.load(ROOT / "models" / "station_policy.json"), "priority": priority}
-
-
 def run_one(job) -> dict:
     layout, policy, robots, rate, seed = job
     w = warehouse(layout)
     orders = generate_orders(w, rate, WARMUP + HORIZON, random.Random(seed))
     m = Simulation(w, orders, robots, greedy_assign, horizon=HORIZON, warmup=WARMUP, seed=seed,
-                   **options(policy)).run()
+                   **policy_options(policy)).run()
     return {"layout": layout, "policy": policy, "rate": rate, "seed": seed, **asdict(m)}
 
 

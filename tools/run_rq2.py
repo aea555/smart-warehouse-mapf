@@ -10,18 +10,14 @@ tamamlanan sipariş sayıları da results/rq2_timeseries.csv dosyasına yazılı
 from __future__ import annotations
 
 import csv
-import json
 import random
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-import numpy as np
-
 from warehouse_mapf.assignment import greedy_assign
 from warehouse_mapf.orders import generate_orders
-from warehouse_mapf.priority import LinearPriority, heuristic
+from warehouse_mapf.policies import policy_options
 from warehouse_mapf.sim import Event, Simulation
-from warehouse_mapf.stations import LearnedStation, QueueAwareStation
 from warehouse_mapf.warehouse import generate_warehouse
 
 WARMUP, HORIZON = 200, 1000
@@ -46,24 +42,16 @@ POLICIES = {
     "P1+replan": dict(planner="windowed", event_replan=True),
     "P2-auction": dict(planner="windowed", allocation="auction"),
     "P2": dict(planner="windowed", allocation="auction", event_replan=True),
-    "P3-rule": dict(planner="windowed", allocation="auction", event_replan=True),   # + kural tabanlı istasyon ve öncelik
-    "P3": dict(planner="windowed", allocation="auction", event_replan=True),        # + öğrenilmiş istasyon ve öncelik
+    "P3-rule": policy_options("P3-rule"),     # + kural tabanlı istasyon ve öncelik
+    "P3": policy_options("P3"),               # + öğrenilmiş istasyon ve öncelik
 }
 
-ROOT = Path(__file__).resolve().parent.parent
-RESULTS = ROOT / "results"
+RESULTS = Path(__file__).resolve().parent.parent / "results"
 
 
-def make_extras(policy: str) -> dict:
+def _fresh(policy: str) -> dict:
     """P3'ün istasyon ve öncelik nesneleri durum tutuyor, o yüzden her simülasyonda yeniden kuruluyor."""
-    if policy == "P3-rule":
-        alpha = json.loads((ROOT / "models" / "station_rule.json").read_text())["alpha"]
-        return {"station": QueueAwareStation(alpha), "priority": heuristic("carrying-first")}
-    if policy == "P3":
-        data = json.loads((ROOT / "models" / "priority_policy.json").read_text())
-        return {"station": LearnedStation.load(ROOT / "models" / "station_policy.json"),
-                "priority": LinearPriority(np.array(data["weights"]) / np.array(data["scale"]), name="learned")}
-    return {}
+    return policy_options(policy) if policy.startswith("P3") else {}
 
 
 def summarize(sim: Simulation) -> dict:
@@ -96,7 +84,7 @@ def run_one(job):
     warehouse = generate_warehouse(density=DENSITY)
     orders = generate_orders(warehouse, rate, WARMUP + HORIZON, random.Random(seed))
     sim = Simulation(warehouse, orders, ROBOTS, greedy_assign, horizon=HORIZON, warmup=WARMUP,
-                     seed=seed, events=SCENARIOS[scenario], **POLICIES[policy], **make_extras(policy))
+                     seed=seed, events=SCENARIOS[scenario], **{**POLICIES[policy], **_fresh(policy)})
     m = sim.run()
     row = {"policy": policy, "scenario": scenario, "rate": rate, "seed": seed,
            "throughput": m.throughput, "mean_completion_time": round(m.mean_completion_time, 1),
