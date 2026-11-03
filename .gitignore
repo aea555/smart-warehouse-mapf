@@ -42,5 +42,5 @@ docs/papers/
 notes/
 
 # Uretilen simulasyon kaydi (tools/export_replay.py)
-unity/Assets/StreamingAssets/replay.json
-unity/Assets/StreamingAssets/replay.json.meta
+unity/Assets/StreamingAssets/replays/
+unity/Assets/StreamingAssets/replays.meta

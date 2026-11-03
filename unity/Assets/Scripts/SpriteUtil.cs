@@ -59,6 +59,34 @@ public static class SpriteUtil
         return Sprite.Create(tex, new Rect(0, 0, res, res), new Vector2(0.5f, 0.5f), res);
     }
 
+    // arızalı robot için çarpı
+    public static Sprite Cross(int res = 64, float thickness = 0.16f)
+    {
+        var tex = new Texture2D(res, res) { filterMode = FilterMode.Bilinear };
+        float half = thickness * res / 2f;
+        for (int y = 0; y < res; y++)
+        for (int x = 0; x < res; x++)
+        {
+            float u = x + 0.5f, v = y + 0.5f;
+            float d = Mathf.Min(Mathf.Abs(u - v), Mathf.Abs(u + v - res)) / Mathf.Sqrt(2f);
+            float edge = Mathf.Min(Mathf.Min(u, v), Mathf.Min(res - u, res - v));
+            float a = Mathf.Clamp01(half - d + 0.5f) * Mathf.Clamp01(edge - res * 0.12f);
+            tex.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+        }
+        tex.Apply();
+        return Sprite.Create(tex, new Rect(0, 0, res, res), new Vector2(0.5f, 0.5f), res);
+    }
+
+    // her hücre bir piksel, harita ve ısı haritası için
+    public static Texture2D CellTexture(int width, int height)
+    {
+        return new Texture2D(width, height, TextureFormat.RGBA32, false)
+        {
+            filterMode = FilterMode.Point,
+            wrapMode = TextureWrapMode.Clamp,
+        };
+    }
+
     public static Material UnlitMaterial()
     {
         var unlit = Shader.Find("Universal Render Pipeline/2D/Sprite-Unlit-Default");
