@@ -1,368 +1,185 @@
-using System;
-using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-// replays/ klasöründeki kayıtları oynatır ve politikaları karşılaştırır.
+// Kayıtları iki harita yan yana olacak şekilde oynatır. İki harita aynı senaryonun (aynı siparişler)
+// farklı politikalarla kaydıdır ve aynı adımda durur, böylece fark gözle görülür.
 //
 // Robotların hareketi Python simülasyonundan gelir (src/warehouse_mapf/sim.py). Unity sadece çizer.
 //
-// Her senaryo dört politikayla ayrı ayrı kaydedildi, hepsi aynı siparişleri görür. Politika
-// değişince aynı adım gösterilir. Sağ paneldeki tablo ve grafik dört politikayı yan yana verir.
-//
-// Haritada dolu/boş daire ürün taşıyıp taşımadığını, kırmızı ilerleyemediğini gösterir. Arızalı
-// robot gri ve çarpılı. Isı haritası son 100 adımda robotların görevdeyken beklediği hücreleri boyar.
-//
 // Kontroller: boşluk oynat/duraklat, sağ/sol ok tek adım, tekerlek yakınlaştır, sürükle kaydır,
-// robota tıkla rotasını gör, 1-4 politika, Esc seçimi kaldır.
+// robota tıkla rotasını gör, Esc seçimi kaldır, H ısı haritası.
 //
 // Python'da y aşağı doğru artar, Unity'de yukarı. Bu yüzden y eksi ile çevrilir.
 public class ReplayView : MonoBehaviour
 {
-    [SerializeField] private string replayFolder = "replays";
+    [SerializeField] string replayFolder = "replays";
 
-    // renkler
-    private static readonly Color Background = new Color(0.07f, 0.08f, 0.10f);
-    private static readonly Color Floor      = new Color(0.17f, 0.19f, 0.23f);
-    private static readonly Color Wall       = new Color(0.11f, 0.12f, 0.15f);
-    private static readonly Color Shelf      = new Color(0.72f, 0.47f, 0.22f);
-    private static readonly Color Station    = new Color(0.20f, 0.65f, 0.60f);
-    private static readonly Color DropMark   = new Color(0.17f, 0.36f, 0.37f);
-    private static readonly Color ParkMark   = new Color(0.24f, 0.27f, 0.32f);
-    private static readonly Color OrderColor = new Color(0.98f, 0.80f, 0.25f);
-    private static readonly Color Moving     = new Color(0.36f, 0.66f, 1.00f);
-    private static readonly Color Stuck      = new Color(1.00f, 0.30f, 0.30f);
-    private static readonly Color Failed     = new Color(0.55f, 0.57f, 0.60f);
-    private static readonly Color Closed     = new Color(0.85f, 0.18f, 0.22f, 0.9f);
-    private static readonly Color Selected   = Color.white;
-    private static readonly Color Muted      = new Color(0.60f, 0.64f, 0.68f);
-
-    // politika renkleri, makaledeki grafiklerle aynı sırada
-    private static readonly Color[] PolicyColors =
+    static readonly Color[] PolicyColors =
     {
         new Color(0.82f, 0.29f, 0.36f), new Color(0.24f, 0.60f, 0.80f),
         new Color(0.93f, 0.68f, 0.29f), new Color(0.66f, 0.55f, 0.98f),
     };
-
-    private static readonly string[] PhaseNames = { "boşta", "toplamaya gidiyor", "ürünle teslimata gidiyor", "parka dönüyor" };
+    static readonly string[] PhaseNames = { "boşta", "rafa gidiyor", "ürünü masaya götürüyor", "parka dönüyor" };
+    static readonly float[] Speeds = { 1f, 3f, 10f, 30f };
 
     // ekran düzeni, 720 piksel yüksekliğe göre
-    private const float RefHeight = 720f;
-    private const float TopBar = 104f;
-    private const float BottomBar = 66f;
-    private const float SideW = 340f;
+    const float RefHeight = 720f;
+    const float TopBar = 52f, PaneHeader = 40f, PaneFooter = 78f, BottomBar = 56f, Gap = 4f;
 
-    private const float MinSpeed = 0.25f, MaxSpeed = 30f;
-    private const float DimAlpha = 0.22f;
-    private const int MapPx = 8;            // harita dokusunda hücre başına piksel
-    private const int HeatWindow = 100;     // ısı haritası son kaç adıma bakar
-    private const float HeatCap = 40f;      // bu kadar bekleme tam kırmızı
+    ReplayIndex index;
+    int scenario;
+    ScenarioInfo Info => index.scenarios[scenario];
+    ReplayPane[] panes;
+    string loadError;
 
-    private ReplayIndex index;
-    private int scenario, policy;
-    private ScenarioInfo Info => index.scenarios[scenario];
-    private readonly Dictionary<string, ReplayRun> cache = new Dictionary<string, ReplayRun>();
-    private ReplayRun run;
+    float time;
+    bool playing;
+    float speed = 3f;
+    bool showHeat, showOrders = true;
+    bool menuOpen, helpOpen;
 
-    private Transform world;
-    private Sprite square, circle, hollow, ring, arrow, cross;
-    private Material spriteMaterial;
+    // iki haritanın ortak görünümü (harita koordinatında merkez ve yakınlık)
+    Vector2 viewCenter;
+    float viewSize, fitSize;
+    int dragPane = -1;
+    Vector2 pressPos, lastMouse;
 
-    private SpriteRenderer[] robots = new SpriteRenderer[0];
-    private SpriteRenderer[] arrows = new SpriteRenderer[0];
-    private SpriteRenderer[] crosses = new SpriteRenderer[0];
-    private readonly List<SpriteRenderer> orderPool = new List<SpriteRenderer>();
-    private readonly List<SpriteRenderer> closedPool = new List<SpriteRenderer>();
-    private Transform orderRoot, closedRoot;
+    GUIStyle bar, title, text, small, big, button, card, overlay;
+    Texture2D track, warmTex, eventTex;
 
-    // ısı haritası
-    private Texture2D heatTex;
-    private SpriteRenderer heatSprite;
-    private Color32[] heatPixels;
-    private int[] heatCounts;
-    private int heatFrame = -1;
-
-    // seçili robot
-    private int selected = -1;
-    private LineRenderer routeLine;
-    private SpriteRenderer selectRing, targetMark;
-
-    // katmanlar
-    private bool showArrows;
-    private bool showOrders = true;
-    private bool showHeat;
-
-    private float time;                 // kayıttaki yer, kesirli adım
-    private bool playing;
-    private float stepsPerSecond = 2f;
-    private string loadError;
-
-    private Camera cam;
-    private float fitSize;
-    private bool dragging;
-    private Vector2 pressPos, lastMouse;
-
-    private Texture2D chartTex;
-    private GUIStyle panelStyle, titleStyle, textStyle, smallStyle, statStyle, buttonStyle, cardStyle, cellStyle, rowStyle;
-    private Texture2D rowSelectedTex, warmupTex, eventTex, cursorTex, trackTex;
-
-    // kurulum
-
-    private void Start()
+    void Start()
     {
-        square = SpriteUtil.Square();
-        circle = SpriteUtil.Circle();
-        hollow = SpriteUtil.Ring(64, 0.38f);
-        ring = SpriteUtil.Ring();
-        arrow = SpriteUtil.Arrow();
-        cross = SpriteUtil.Cross();
-        spriteMaterial = SpriteUtil.UnlitMaterial();
-        cam = Camera.main;
+        var art = new ReplayPane.Art
+        {
+            square = SpriteUtil.Square(), circle = SpriteUtil.Circle(), hollow = SpriteUtil.Ring(64, 0.38f),
+            ring = SpriteUtil.Ring(), arrow = SpriteUtil.Arrow(), cross = SpriteUtil.Cross(),
+            material = SpriteUtil.UnlitMaterial(),
+        };
+        var second = new GameObject("Camera 2").AddComponent<Camera>();
+        panes = new[] { new ReplayPane(Camera.main, 0f, art), new ReplayPane(second, 10000f, art) };
 
         string file = Path.Combine(Application.streamingAssetsPath, replayFolder, "index.json");
         if (!File.Exists(file))
         {
-            loadError = "replays/index.json bulunamadi. Once: uv run python tools/export_replay.py";
+            loadError = "replays/index.json yok. Önce: uv run python tools/export_replay.py";
             return;
         }
         index = JsonUtility.FromJson<ReplayIndex>(File.ReadAllText(file));
-        if (index.scenarios == null || index.scenarios.Length == 0)
-        {
-            loadError = "index.json icinde senaryo yok.";
-            return;
-        }
-        policy = index.policies.Length - 1;      // en gelişmiş politikayla başla
+        panes[0].policy = 0;                          // solda en basit politika
+        panes[1].policy = index.policies.Length - 1;  // sağda en gelişmiş politika
         ShowScenario(0);
     }
 
-    private ReplayRun Load(int s, int p)
+    ReplayRun Load(int policy)
     {
-        string key = $"{index.scenarios[s].id}_{index.policies[p].id}";
-        if (cache.TryGetValue(key, out var cached)) return cached;
-        string file = Path.Combine(Application.streamingAssetsPath, replayFolder, key + ".json");
-        var r = JsonUtility.FromJson<ReplayRun>(File.ReadAllText(file));
-        cache[key] = r;
-        return r;
+        string name = $"{Info.id}_{index.policies[policy].id}.json";
+        return JsonUtility.FromJson<ReplayRun>(File.ReadAllText(Path.Combine(Application.streamingAssetsPath, replayFolder, name)));
     }
 
-    private void ShowScenario(int s)
+    void ShowScenario(int s)
     {
-        scenario = (s + index.scenarios.Length) % index.scenarios.Length;
-        cache.Clear();                       // sadece açık senaryonun kayıtları bellekte kalsın
+        scenario = s;
         time = 0f;
         playing = false;
-        selected = -1;
-        ShowPolicy(policy, fit: true);
-        BuildChart();
-    }
-
-    private void ShowPolicy(int p, bool fit = false)
-    {
-        policy = (p + index.policies.Length) % index.policies.Length;
-        run = Load(scenario, policy);
-        if (world != null) Destroy(world.gameObject);
-        world = new GameObject("World").transform;
-        if (selected >= run.robots) selected = -1;
-        Build();
-        if (fit) FitCamera();
-        heatFrame = -1;
-        Apply();
-    }
-
-    private static Vector3 World(float x, float y) => new Vector3(x, -y, 0f);
-
-    private void Build()
-    {
-        BuildMap();
-
-        closedRoot = new GameObject("Closed").transform;
-        closedRoot.SetParent(world, false);
-        closedPool.Clear();
-        orderRoot = new GameObject("Orders").transform;
-        orderRoot.SetParent(world, false);
-        orderPool.Clear();
-
-        var robotRoot = new GameObject("Robots").transform;
-        robotRoot.SetParent(world, false);
-        int n = run.robots;
-        robots = new SpriteRenderer[n];
-        arrows = new SpriteRenderer[n];
-        crosses = new SpriteRenderer[n];
-        for (int i = 0; i < n; i++)
+        foreach (var p in panes)
         {
-            robots[i] = Spawn($"Robot {i}", circle, Vector3.zero, Moving, 0.72f, 5, robotRoot);
-            arrows[i] = Child(robots[i], arrow, Color.white, 0.45f, 7);
-            crosses[i] = Child(robots[i], cross, new Color(0.12f, 0.12f, 0.14f), 0.8f, 6);
+            p.selected = -1;
+            p.Show(Load(p.policy), p.policy);
         }
-
-        // seçim göstergeleri
-        var lineGo = new GameObject("Route");
-        lineGo.transform.SetParent(world, false);
-        routeLine = lineGo.AddComponent<LineRenderer>();
-        routeLine.sharedMaterial = spriteMaterial;
-        routeLine.startWidth = routeLine.endWidth = 0.14f;
-        routeLine.startColor = routeLine.endColor = Selected;
-        routeLine.sortingOrder = 4;
-        routeLine.numCornerVertices = 2;
-        routeLine.positionCount = 0;
-
-        selectRing = Spawn("SelectRing", ring, Vector3.zero, Selected, 1.25f, 8, world);
-        targetMark = Spawn("Target", ring, Vector3.zero, Selected, 0.9f, 8, world);
-        selectRing.enabled = targetMark.enabled = false;
+        Fit();
+        Redraw();
     }
 
-    // Sabit harita tek bir doku olarak çizilir. Büyük depoda binlerce nesne yerine tek sprite yeterli.
-    // Hücreler arasında bir piksel boşluk kalır, ızgara okunsun diye.
-    private void BuildMap()
+    void SetPolicy(int pane, int policy)
     {
-        int w = run.width, h = run.height;
-        var colors = new Color32[w * h];
-        for (int i = 0; i < colors.Length; i++) colors[i] = Floor;
-        void Paint(CellXY[] cells, Color c) { foreach (var q in cells) colors[q.x + q.y * w] = c; }
-        Paint(run.parks, ParkMark);
-        Paint(run.drops, DropMark);
-        Paint(run.shelves, Shelf);
-        Paint(run.walls ?? new CellXY[0], Wall);
-        Paint(run.stations, Station);
+        policy = (policy + index.policies.Length) % index.policies.Length;
+        panes[pane].Show(Load(policy), policy);
+        Redraw();
+    }
 
-        var tex = SpriteUtil.CellTexture(w * MapPx, h * MapPx);
-        var px = new Color32[w * MapPx * h * MapPx];
-        Color32 gap = Background;
-        for (int py = 0; py < h * MapPx; py++)
-        for (int pxX = 0; pxX < w * MapPx; pxX++)
+    // kamera
+
+    void Layout()
+    {
+        float bottom = (BottomBar + PaneFooter) / RefHeight;
+        float height = 1f - (TopBar + PaneHeader + BottomBar + PaneFooter) / RefHeight;
+        float gap = Gap / RefHeight * Screen.height / Screen.width / 2f;
+        panes[0].cam.rect = new Rect(0f, bottom, 0.5f - gap, height);
+        panes[1].cam.rect = new Rect(0.5f + gap, bottom, 0.5f - gap, height);
+    }
+
+    void Fit()
+    {
+        Layout();
+        var run = panes[0].run;
+        float aspect = panes[0].cam.aspect;
+        fitSize = Mathf.Max((run.height + 1f) / 2f, (run.width + 1f) / (2f * aspect));
+        viewSize = fitSize;
+        viewCenter = new Vector2((run.width - 1) / 2f, -(run.height - 1) / 2f);
+        ApplyView();
+    }
+
+    void ApplyView()
+    {
+        foreach (var p in panes)
         {
-            int cx = pxX / MapPx, cy = h - 1 - py / MapPx;        // doku alttan başlar
-            bool edge = pxX % MapPx == 0 || py % MapPx == 0;
-            Color32 c = colors[cx + cy * w];
-            bool solid = c.Equals((Color32)Shelf) || c.Equals((Color32)Wall);   // raflar bitişik görünsün
-            px[pxX + py * w * MapPx] = edge && !solid ? gap : c;
+            p.cam.orthographicSize = viewSize;
+            p.cam.transform.position = new Vector3(viewCenter.x + p.offset, viewCenter.y, -10f);
         }
-        tex.SetPixels32(px);
-        tex.Apply();
-        var map = Spawn("Map", Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), MapPx),
-                        World((w - 1) / 2f, (h - 1) / 2f), Color.white, 1f, 0, world);
-        map.name = "Map";
-
-        heatTex = SpriteUtil.CellTexture(w, h);
-        heatPixels = new Color32[w * h];
-        heatCounts = new int[w * h];
-        heatTex.SetPixels32(heatPixels);
-        heatTex.Apply();
-        heatSprite = Spawn("Heat", Sprite.Create(heatTex, new Rect(0, 0, w, h), new Vector2(0.5f, 0.5f), 1f),
-                           World((w - 1) / 2f, (h - 1) / 2f), Color.white, 1f, 2, world);
-        heatSprite.enabled = showHeat;
     }
 
-    private SpriteRenderer Spawn(string name, Sprite sprite, Vector3 pos, Color color,
-                                 float scale, int order, Transform parent)
+    int PaneAt(Vector2 screen)
     {
-        var go = new GameObject(name);
-        go.transform.SetParent(parent, false);
-        go.transform.position = pos;
-        go.transform.localScale = new Vector3(scale, scale, 1f);
-        var sr = go.AddComponent<SpriteRenderer>();
-        sr.sprite = sprite;
-        sr.color = color;
-        sr.sortingOrder = order;
-        if (spriteMaterial != null) sr.sharedMaterial = spriteMaterial;
-        return sr;
+        for (int i = 0; i < panes.Length; i++)
+            if (panes[i].cam.pixelRect.Contains(screen)) return i;
+        return -1;
     }
 
-    private SpriteRenderer Child(SpriteRenderer parent, Sprite sprite, Color color, float scale, int order)
-    {
-        var sr = Spawn("Child", sprite, Vector3.zero, color, scale, order, parent.transform);
-        sr.transform.localPosition = Vector3.zero;
-        sr.transform.localScale = new Vector3(scale, scale, 1f);
-        return sr;
-    }
-
-    // kamera ve fare
-
-    // kamera sadece üst/alt çubuklar ve sağ panelin arasına çizer
-    private void UpdateViewport()
-    {
-        float k = Screen.height / RefHeight;
-        float side = Mathf.Min(SideW * k / Screen.width, 0.6f);
-        cam.rect = new Rect(0f, BottomBar / RefHeight, 1f - side, 1f - (TopBar + BottomBar) / RefHeight);
-    }
-
-    // haritanın tamamı harita alanına sığsın
-    private void FitCamera()
-    {
-        cam.orthographic = true;
-        cam.clearFlags = CameraClearFlags.SolidColor;
-        cam.backgroundColor = Background;
-        UpdateViewport();
-
-        const float margin = 1f;
-        float sizeH = (run.height + margin) / 2f;
-        float sizeW = (run.width + margin) / (2f * cam.aspect);
-        fitSize = Mathf.Max(sizeH, sizeW);
-        cam.orthographicSize = fitSize;
-        cam.transform.position = new Vector3((run.width - 1) / 2f, -(run.height - 1) / 2f, -10f);
-    }
-
-    private void HandleMouse()
+    void HandleMouse()
     {
         var mouse = Mouse.current;
-        if (mouse == null) return;
+        if (mouse == null || menuOpen || helpOpen) return;
         Vector2 pos = mouse.position.ReadValue();
-        float k = Screen.height / RefHeight;
-        bool overCanvas = cam.pixelRect.Contains(pos)
-                          && !(selected >= 0 && CardRect().Contains(new Vector2(pos.x / k, (Screen.height - pos.y) / k)));
+        int over = PaneAt(pos);
 
         float scroll = mouse.scroll.ReadValue().y;
-        if (overCanvas && Mathf.Abs(scroll) > 0.01f)
+        if (over >= 0 && Mathf.Abs(scroll) > 0.01f)
         {
+            var cam = panes[over].cam;
             Vector3 before = cam.ScreenToWorldPoint(pos);
-            float factor = scroll > 0 ? 0.88f : 1f / 0.88f;
-            cam.orthographicSize = Mathf.Clamp(cam.orthographicSize * factor, 3f, fitSize * 1.5f);
+            viewSize = Mathf.Clamp(viewSize * (scroll > 0 ? 0.88f : 1f / 0.88f), 3f, fitSize * 1.5f);
+            ApplyView();
             Vector3 after = cam.ScreenToWorldPoint(pos);
-            cam.transform.position += before - after;   // imlecin altındaki nokta yerinde kalsın
+            viewCenter += (Vector2)(before - after);   // imlecin altındaki nokta yerinde kalsın
+            ApplyView();
         }
 
-        if (mouse.leftButton.wasPressedThisFrame && overCanvas) { dragging = true; pressPos = lastMouse = pos; }
-        if (dragging && mouse.leftButton.isPressed)
+        if (mouse.leftButton.wasPressedThisFrame && over >= 0) { dragPane = over; pressPos = lastMouse = pos; }
+        if (dragPane >= 0 && mouse.leftButton.isPressed)
         {
-            Vector3 delta = cam.ScreenToWorldPoint(lastMouse) - cam.ScreenToWorldPoint(pos);
-            cam.transform.position += new Vector3(delta.x, delta.y, 0f);
+            var cam = panes[dragPane].cam;
+            viewCenter += (Vector2)(cam.ScreenToWorldPoint(lastMouse) - cam.ScreenToWorldPoint(pos));
+            ApplyView();
             lastMouse = pos;
         }
-        if (dragging && mouse.leftButton.wasReleasedThisFrame)
+        if (dragPane >= 0 && mouse.leftButton.wasReleasedThisFrame)
         {
-            dragging = false;
-            if ((pos - pressPos).magnitude < 6f) Select(RobotAt(cam.ScreenToWorldPoint(pos)));   // sürükleme değil, tık
+            var p = panes[dragPane];
+            if ((pos - pressPos).magnitude < 6f) { p.selected = p.RobotAt(p.cam.ScreenToWorldPoint(pos)); Redraw(); }
+            dragPane = -1;
         }
-    }
-
-    private int RobotAt(Vector3 p)
-    {
-        int best = -1;
-        float bestD = 0.6f;
-        for (int r = 0; r < robots.Length; r++)
-        {
-            float d = Vector2.Distance(robots[r].transform.position, p);
-            if (d < bestD) { bestD = d; best = r; }
-        }
-        return best;
-    }
-
-    private void Select(int r)
-    {
-        selected = r;
-        Apply();
     }
 
     // oynatma
 
-    private int LastFrame => run.frames.Length - 1;
-    private int FrameIndex => Mathf.Clamp(Mathf.FloorToInt(time), 0, LastFrame);
+    int LastFrame => panes[0].run.frames.Length - 1;
+    int Step => Mathf.Clamp(Mathf.FloorToInt(time), 0, LastFrame);
 
-    private void Update()
+    void Update()
     {
-        if (run == null) return;
-        UpdateViewport();
+        if (index == null) return;
+        Layout();
         HandleMouse();
 
         var kb = Keyboard.current;
@@ -371,236 +188,44 @@ public class ReplayView : MonoBehaviour
             if (kb.spaceKey.wasPressedThisFrame) TogglePlay();
             if (kb.rightArrowKey.wasPressedThisFrame) Seek(Mathf.Floor(time) + 1f);
             if (kb.leftArrowKey.wasPressedThisFrame) Seek(Mathf.Ceil(time) - 1f);
-            if (kb.escapeKey.wasPressedThisFrame) Select(-1);
-            if (kb.digit1Key.wasPressedThisFrame) ShowPolicy(0);
-            if (kb.digit2Key.wasPressedThisFrame) ShowPolicy(1);
-            if (kb.digit3Key.wasPressedThisFrame) ShowPolicy(2);
-            if (kb.digit4Key.wasPressedThisFrame) ShowPolicy(3);
+            if (kb.hKey.wasPressedThisFrame) { showHeat = !showHeat; Redraw(); }
+            if (kb.escapeKey.wasPressedThisFrame)
+            {
+                menuOpen = helpOpen = false;
+                foreach (var p in panes) p.selected = -1;
+                Redraw();
+            }
         }
 
         if (!playing) return;
-        time += stepsPerSecond * Time.deltaTime;
+        time += speed * Time.deltaTime;
         if (time >= LastFrame) { time = LastFrame; playing = false; }
-        Apply();
+        Redraw();
     }
 
-    private void TogglePlay()
+    void TogglePlay()
     {
         if (time >= LastFrame) time = 0f;
         playing = !playing;
     }
 
-    private void Seek(float t)
+    void Seek(float t)
     {
-        playing = false;
         time = Mathf.Clamp(t, 0f, LastFrame);
-        Apply();
+        Redraw();
     }
 
-    // robotları, siparişleri, kapalı hücreleri ve seçimi şu anki zamana göre çizer
-    private void Apply()
+    void Redraw()
     {
-        int i = FrameIndex;
-        int j = Mathf.Min(i + 1, LastFrame);
-        float f = Mathf.SmoothStep(0f, 1f, time - i);   // hücreden hücreye yumuşak geçiş
-        var a = run.frames[i];
-        var b = run.frames[j];
-        bool focus = selected >= 0;
-
-        for (int r = 0; r < robots.Length; r++)
-        {
-            float x = Mathf.Lerp(a.xs[r], b.xs[r], f);
-            float y = Mathf.Lerp(a.ys[r], b.ys[r], f);
-            robots[r].transform.position = World(x, y);
-
-            // dolu daire ürün taşıyor, boş daire taşımıyor, kırmızı ilerleyemiyor, gri çarpılı arızalı
-            bool broken = Array.IndexOf(a.failed, r) >= 0;
-            robots[r].sprite = a.phase[r] == 2 || broken ? circle : hollow;
-            Color c = broken ? Failed : a.blocked[r] > 0 ? Stuck : Moving;
-            if (focus && r != selected) c.a = DimAlpha;
-            robots[r].color = c;
-            crosses[r].enabled = broken;
-
-            int dx = a.nx[r] - a.xs[r], dy = a.ny[r] - a.ys[r];
-            bool wants = !broken && (showArrows || r == selected) && (dx != 0 || dy != 0);
-            arrows[r].enabled = wants;
-            if (wants)
-            {
-                arrows[r].transform.localPosition = new Vector3(dx, -dy, 0f) * 0.62f;
-                arrows[r].transform.localRotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(-dy, dx) * Mathf.Rad2Deg);
-                Color ac = a.blocked[r] > 0 ? Stuck : Color.white;
-                if (focus && r != selected) ac.a = DimAlpha;
-                arrows[r].color = ac;
-            }
-        }
-
-        Pool(orderPool, orderRoot, showOrders ? a.openPicks : new CellXY[0], OrderColor, 0.30f, 3, 45f,
-             focus ? DimAlpha : 1f);
-        Pool(closedPool, closedRoot, a.closed ?? new CellXY[0], Closed, 0.92f, 1, 0f, 1f);
-
-        if (showHeat && heatFrame != i) UpdateHeat(i);
-        heatSprite.enabled = showHeat;
-
-        DrawSelection(a);
+        foreach (var p in panes) p.Apply(time, showOrders, showHeat);
     }
-
-    // bekleyen sipariş ve kapalı hücre işaretleri, havuzdan tekrar kullanılır
-    private void Pool(List<SpriteRenderer> pool, Transform root, CellXY[] cells, Color color,
-                      float scale, int order, float angle, float alpha)
-    {
-        while (pool.Count < cells.Length)
-        {
-            var d = Spawn("Mark", square, Vector3.zero, color, scale, order, root);
-            d.transform.rotation = Quaternion.Euler(0f, 0f, angle);
-            pool.Add(d);
-        }
-        for (int k = 0; k < pool.Count; k++)
-        {
-            bool on = k < cells.Length;
-            pool[k].enabled = on;
-            if (!on) continue;
-            pool[k].transform.position = World(cells[k].x, cells[k].y);
-            pool[k].color = new Color(color.r, color.g, color.b, color.a * alpha);
-        }
-    }
-
-    // Son 100 adımda görevdeki bir robot yerinden kımıldamadıysa, durduğu hücreye bir puan yazılır.
-    // Puan arttıkça hücre sarıdan kırmızıya döner.
-    private void UpdateHeat(int i)
-    {
-        heatFrame = i;
-        int w = run.width, h = run.height;
-        Array.Clear(heatCounts, 0, heatCounts.Length);
-        for (int t = Mathf.Max(1, i - HeatWindow + 1); t <= i; t++)
-        {
-            var prev = run.frames[t - 1];
-            var fr = run.frames[t];
-            for (int r = 0; r < fr.xs.Length; r++)
-            {
-                if (fr.phase[r] == 0 || fr.xs[r] != prev.xs[r] || fr.ys[r] != prev.ys[r]) continue;
-                if (Array.IndexOf(fr.failed, r) >= 0) continue;
-                heatCounts[fr.xs[r] + fr.ys[r] * w]++;
-            }
-        }
-        var low = new Color(1f, 0.85f, 0.25f);
-        var high = new Color(1f, 0.15f, 0.15f);
-        for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++)
-        {
-            int n = heatCounts[x + y * w];
-            int p = x + (h - 1 - y) * w;                 // doku alttan başlar
-            if (n == 0) { heatPixels[p] = new Color32(0, 0, 0, 0); continue; }
-            float v = Mathf.Clamp01(n / HeatCap);
-            Color c = Color.Lerp(low, high, v);
-            c.a = 0.35f + 0.55f * v;
-            heatPixels[p] = c;
-        }
-        heatTex.SetPixels32(heatPixels);
-        heatTex.Apply();
-    }
-
-    // seçili robotun rotası ve hedefi
-    private void DrawSelection(ReplayFrame a)
-    {
-        bool on = selected >= 0;
-        selectRing.enabled = targetMark.enabled = on;
-        if (!on) { routeLine.positionCount = 0; return; }
-
-        Vector3 here = robots[selected].transform.position;
-        selectRing.transform.position = here;
-        targetMark.transform.position = World(a.tx[selected], a.ty[selected]);
-
-        var pts = new List<Vector3> { here };
-        int p = a.plan[selected];
-        if (p >= 0)
-        {
-            var plan = run.plans[p];
-            for (int k = a.planOffset[selected]; k < plan.xs.Length; k++) pts.Add(World(plan.xs[k], plan.ys[k]));
-        }
-        routeLine.positionCount = pts.Count;
-        routeLine.SetPositions(pts.ToArray());
-    }
-
-    // karşılaştırma grafiği
-
-    private const int ChartW = 620, ChartH = 250;    // doku boyutu, ekranda yarısı kadar çizilir
-
-    // Dört politikanın ısınmadan sonra biten sipariş eğrisi tek dokuya çizilir.
-    // Senaryo değişince bir kez üretilir, oynarken sadece imleç çizgisi kayar.
-    private void BuildChart()
-    {
-        var info = Info;
-        int steps = info.series[0].completed.Length;
-        int max = 1;
-        foreach (var s in info.series) max = Mathf.Max(max, s.completed[steps - 1]);
-        max = Mathf.CeilToInt(max * 1.08f);
-
-        if (chartTex == null) chartTex = new Texture2D(ChartW, ChartH, TextureFormat.RGBA32, false);
-        var px = new Color32[ChartW * ChartH];
-        Color32 bg = new Color(0.10f, 0.11f, 0.14f);
-        Color32 warm = new Color(0.20f, 0.18f, 0.12f);
-        Color32 evt = new Color(0.25f, 0.12f, 0.14f);
-        Color32 grid = new Color(0.17f, 0.19f, 0.23f);
-        for (int x = 0; x < ChartW; x++)
-        {
-            int step = x * (steps - 1) / (ChartW - 1);
-            Color32 col = step < info.warmup ? warm : bg;
-            foreach (var e in info.events)
-                if (step >= e.start && step < e.start + e.duration) col = evt;
-            for (int y = 0; y < ChartH; y++) px[x + y * ChartW] = col;
-        }
-        for (int g = 1; g < 4; g++)
-            for (int x = 0; x < ChartW; x++) px[x + g * ChartH / 4 * ChartW] = grid;
-
-        for (int p = 0; p < info.series.Length; p++)
-        {
-            Color32 c = PolicyColors[p % PolicyColors.Length];
-            var s = info.series[p].completed;
-            int lastY = -1;
-            for (int x = 0; x < ChartW; x++)
-            {
-                int step = x * (steps - 1) / (ChartW - 1);
-                int y = Mathf.RoundToInt((ChartH - 4) * s[step] / (float)max) + 2;
-                int y0 = lastY < 0 ? y : Mathf.Min(lastY, y), y1 = lastY < 0 ? y : Mathf.Max(lastY, y);
-                for (int yy = y0 - 1; yy <= y1 + 1; yy++)
-                    for (int xx = x; xx <= Mathf.Min(x + 1, ChartW - 1); xx++)
-                        if (yy >= 0 && yy < ChartH) px[xx + yy * ChartW] = c;
-                lastY = y;
-            }
-        }
-        for (int i = 0; i < px.Length; i++) px[i] = ((Color)px[i]).linear;   // IMGUI için, bkz. Solid
-        chartTex.SetPixels32(px);
-        chartTex.Apply();
-        chartMax = max;
-    }
-
-    private int chartMax;
 
     // arayüz
 
-    private void InitStyles()
+    // Proje doğrusal renk uzayında, IMGUI ise dokuyu bir kez daha çeviriyor.
+    // Renk önce doğrusala çevrilir ki ekranda yazıldığı gibi görünsün.
+    static Texture2D Solid(Color c)
     {
-        if (panelStyle != null) return;
-        panelStyle = new GUIStyle { normal = { background = Solid(new Color(0.04f, 0.045f, 0.06f, 1f)) }, padding = new RectOffset(14, 14, 8, 8) };
-        cardStyle  = new GUIStyle { normal = { background = Solid(new Color(0.06f, 0.07f, 0.09f, 0.94f)) }, padding = new RectOffset(14, 14, 10, 10) };
-        titleStyle = new GUIStyle { fontSize = 17, fontStyle = FontStyle.Bold, richText = true, normal = { textColor = Color.white } };
-        textStyle  = new GUIStyle { fontSize = 13, richText = true, wordWrap = true, normal = { textColor = new Color(0.78f, 0.81f, 0.86f) } };
-        smallStyle = new GUIStyle(textStyle) { fontSize = 11, normal = { textColor = Muted } };
-        statStyle  = new GUIStyle(textStyle) { fontSize = 14, wordWrap = false };
-        buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = 13, fixedHeight = 26, richText = true };
-        cellStyle = new GUIStyle(textStyle) { wordWrap = false, alignment = TextAnchor.MiddleRight };
-        rowStyle = new GUIStyle { padding = new RectOffset(6, 6, 3, 3), hover = { background = Solid(new Color(1f, 1f, 1f, 0.05f)) } };
-        rowSelectedTex = Solid(new Color(1f, 1f, 1f, 0.09f));
-        warmupTex = Solid(new Color(0.95f, 0.79f, 0.30f, 0.35f));
-        eventTex = Solid(new Color(0.85f, 0.18f, 0.22f, 0.45f));
-        cursorTex = Solid(new Color(1f, 1f, 1f, 0.85f));
-        trackTex = Solid(new Color(0.22f, 0.24f, 0.28f));
-    }
-
-    private static Texture2D Solid(Color c)
-    {
-        // Proje doğrusal renk uzayında, IMGUI ise dokuyu bir kez daha çeviriyor.
-        // Renk önce doğrusala çevrilir ki ekranda yazıldığı gibi görünsün.
         var t = new Texture2D(1, 1);
         var lin = c.linear;
         t.SetPixel(0, 0, new Color(lin.r, lin.g, lin.b, c.a));
@@ -608,238 +233,200 @@ public class ReplayView : MonoBehaviour
         return t;
     }
 
-    private static string Hex(Color c) => ColorUtility.ToHtmlStringRGB(c);
+    static string Hex(Color c) => ColorUtility.ToHtmlStringRGB(c);
 
-    // kart robotun karşı tarafında durur, robotu ve rotasını örtmesin
-    private Rect CardRect()
+    void Styles()
     {
-        float w = Screen.width / (Screen.height / RefHeight);
-        bool robotOnRight = selected >= 0 && cam.WorldToViewportPoint(robots[selected].transform.position).x > 0.5f;
-        float x = robotOnRight ? 14f : w - SideW - 300f;
-        return new Rect(x, TopBar + 12, 286, 170);
+        if (bar != null) return;
+        bar = new GUIStyle { normal = { background = Solid(new Color(0.04f, 0.045f, 0.06f)) } };
+        card = new GUIStyle { normal = { background = Solid(new Color(0.06f, 0.07f, 0.09f)) }, padding = new RectOffset(14, 14, 10, 10) };
+        overlay = new GUIStyle { normal = { background = Solid(new Color(0f, 0f, 0f, 0.6f)) } };
+        title = new GUIStyle { fontSize = 18, fontStyle = FontStyle.Bold, richText = true, normal = { textColor = Color.white } };
+        text = new GUIStyle { fontSize = 14, richText = true, wordWrap = true, normal = { textColor = new Color(0.80f, 0.83f, 0.88f) } };
+        small = new GUIStyle(text) { fontSize = 12, normal = { textColor = new Color(0.58f, 0.62f, 0.67f) } };
+        big = new GUIStyle(title) { fontSize = 30 };
+        button = new GUIStyle(GUI.skin.button) { fontSize = 14, richText = true };
+        track = Solid(new Color(0.22f, 0.24f, 0.28f));
+        warmTex = Solid(new Color(0.95f, 0.79f, 0.30f, 0.45f));
+        eventTex = Solid(new Color(0.85f, 0.18f, 0.22f, 0.6f));
     }
 
-    private string ActiveEvent(int step)
+    void OnGUI()
+    {
+        Styles();
+        float k = Screen.height / RefHeight;
+        GUI.matrix = Matrix4x4.Scale(new Vector3(k, k, 1f));
+        float w = Screen.width / k, h = RefHeight;
+
+        if (loadError != null) { GUI.Label(new Rect(20, 20, 900, 40), loadError, title); return; }
+
+        GUI.enabled = !menuOpen && !helpOpen;
+        // iki kameranın arasındaki şerit hiçbir kamerayla temizlenmiyor, üstü kapatılır
+        GUI.DrawTexture(new Rect((w - Gap) / 2f, 0, Gap, h), bar.normal.background);
+        DrawTop(w);
+        for (int i = 0; i < panes.Length; i++) DrawPane(i, w, h);
+        DrawBottom(w, h);
+        GUI.enabled = true;
+
+        if (menuOpen) DrawMenu(w, h);
+        if (helpOpen) DrawHelp(w, h);
+    }
+
+    void DrawTop(float w)
+    {
+        GUI.Box(new Rect(0, 0, w, TopBar), GUIContent.none, bar);
+        if (GUI.Button(new Rect(14, 10, 230, 32), $"<b>{Info.title}</b>  ▾", button)) menuOpen = true;
+        GUI.Label(new Rect(258, 16, w - 420, 24), Info.about, text);
+
+        string evt = ActiveEvent();
+        if (evt != null) GUI.Label(new Rect(w - 420, 16, 340, 24), $"<color=#ff6b6b><b>{evt}</b></color>", text);
+        if (GUI.Button(new Rect(w - 54, 10, 40, 32), "?", button)) helpOpen = true;
+    }
+
+    string ActiveEvent()
     {
         foreach (var e in Info.events)
         {
-            if (step < e.start || step >= e.start + e.duration) continue;
-            int left = e.start + e.duration - step;
-            return e.kind == "block" ? $"Koridor kapalı · {left} adım kaldı" : $"Robotlar arızalı · {left} adım kaldı";
+            if (Step < e.start || Step >= e.start + e.duration) continue;
+            int left = e.start + e.duration - Step;
+            return e.kind == "block" ? $"Koridor kapalı, {left} adım kaldı" : $"5 robot arızalı, {left} adım kaldı";
         }
         return null;
     }
 
-    private void OnGUI()
+    void DrawPane(int i, float w, float h)
     {
-        InitStyles();
-        float k = Screen.height / RefHeight;
-        GUI.matrix = Matrix4x4.Scale(new Vector3(k, k, 1f));
-        float w = Screen.width / k;
-        float h = RefHeight;
+        var pane = panes[i];
+        float half = (w - Gap) / 2f;
+        float x = i == 0 ? 0f : half + Gap;
+        int p = pane.policy;
 
-        if (loadError != null)
+        // üstte politika adı ve değiştirme okları
+        GUI.Box(new Rect(x, TopBar, half, PaneHeader), GUIContent.none, bar);
+        if (GUI.Button(new Rect(x + 10, TopBar + 6, 30, 28), "◀", button)) SetPolicy(i, p - 1);
+        GUI.Label(new Rect(x + 50, TopBar + 9, half - 100, 26),
+            $"<color=#{Hex(PolicyColors[p])}>●</color> <b>{index.policies[p].id}</b>  {index.policies[p].name}", title);
+        if (GUI.Button(new Rect(x + half - 40, TopBar + 6, 30, 28), "▶", button)) SetPolicy(i, p + 1);
+
+        // altta iki büyük sayı
+        float y = h - BottomBar - PaneFooter;
+        GUI.Box(new Rect(x, y, half, PaneFooter), GUIContent.none, bar);
+        var s = Info.series[p];
+        int step = Step;
+        if (step < Info.warmup)
         {
-            GUI.Label(new Rect(20, 20, 900, 40), loadError, titleStyle);
-            return;
+            GUI.Label(new Rect(x + 20, y + 22, half - 40, 30),
+                $"Isınma: ölçüm {Info.warmup}. adımda başlar", text);
+        }
+        else
+        {
+            GUI.Label(new Rect(x + 20, y + 8, 160, 40), s.completed[step].ToString(), big);
+            GUI.Label(new Rect(x + 20, y + 46, 200, 20), "sipariş teslim edildi", small);
+            string mean = s.completed[step] > 0 ? s.meanTime[step].ToString("0") : "–";
+            GUI.Label(new Rect(x + 210, y + 8, 160, 40), mean, big);
+            GUI.Label(new Rect(x + 210, y + 46, 220, 20), "adımda teslim (ortalama)", small);
+            if (s.stuck[step] > 0)
+                GUI.Label(new Rect(x + half - 170, y + 26, 160, 24), $"<color=#ff6b6b>{s.stuck[step]} robot sıkışık</color>", text);
         }
 
-        int step = FrameIndex;
-        var fr = run.frames[step];
-
-        DrawTopBar(w, step);
-        DrawSidePanel(w, h, step);
-        if (selected >= 0) DrawCard(fr);
-        DrawBottomBar(w, h);
+        if (pane.selected >= 0) DrawCard(pane, x);
     }
 
-    private void DrawTopBar(float w, int step)
+    void DrawCard(ReplayPane pane, float x)
     {
-        GUI.Box(new Rect(0, 0, w, TopBar), GUIContent.none, panelStyle);
-        const float controlsW = 430f;
-        float left = w - controlsW - 28;
+        var fr = pane.run.frames[Step];
+        int r = pane.selected;
+        bool broken = System.Array.IndexOf(fr.failed, r) >= 0;
+        string state = broken ? "arızalı"
+                     : fr.phase[r] == 0 ? "parkta bekliyor"
+                     : fr.blocked[r] > 0 ? $"<color=#ff6b6b>{fr.blocked[r]} adımdır ilerleyemiyor</color>"
+                     : PhaseNames[fr.phase[r]];
+        int left = fr.plan[r] >= 0 ? pane.run.plans[fr.plan[r]].xs.Length - fr.planOffset[r] : 0;
+        string order = fr.order[r] >= 0 ? $"Sipariş #{fr.order[r]}, hedefe {left} adım" : "Siparişi yok";
 
-        GUILayout.BeginArea(new Rect(14, 8, left, TopBar - 10));
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Senaryo", smallStyle, GUILayout.Width(62));
-        var titles = new string[index.scenarios.Length];
-        for (int s = 0; s < titles.Length; s++) titles[s] = index.scenarios[s].title;
-        int ns = GUILayout.Toolbar(scenario, titles, buttonStyle);
-        GUILayout.EndHorizontal();
-        if (ns != scenario) ShowScenario(ns);
-
-        GUILayout.Space(4);
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Politika", smallStyle, GUILayout.Width(62));
-        var names = new string[index.policies.Length];
-        for (int p = 0; p < names.Length; p++)
-            names[p] = $"<color=#{Hex(PolicyColors[p])}>●</color> {index.policies[p].id} · {index.policies[p].name}";
-        int np = GUILayout.Toolbar(policy, names, buttonStyle);
-        GUILayout.EndHorizontal();
-        if (np != policy) ShowPolicy(np);
-
-        GUILayout.Space(3);
-        string phase = step < run.warmup ? "  <color=#f2c94c>ısınma (ölçüme dahil değil)</color>" : "";
-        string evt = ActiveEvent(step);
-        string evtText = evt != null ? $"   <color=#ff6b6b><b>{evt}</b></color>" : "";
-        GUILayout.Label($"Adım <b>{step}</b>/{LastFrame}{phase}{evtText}   <color=#9aa3ad>{index.policies[policy].about}</color>", statStyle);
-        GUILayout.EndArea();
-
-        GUILayout.BeginArea(new Rect(w - controlsW - 14, 8, controlsW, TopBar - 12));
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button(playing ? "❚❚ Duraklat" : "▶ Başlat", buttonStyle, GUILayout.Width(100))) TogglePlay();
-        if (GUILayout.Button("◀ Adım", buttonStyle)) Seek(Mathf.Ceil(time) - 1f);
-        if (GUILayout.Button("Adım ▶", buttonStyle)) Seek(Mathf.Floor(time) + 1f);
-        if (GUILayout.Button("Isınmayı atla »", buttonStyle, GUILayout.Width(118))) Seek(run.warmup);
-        GUILayout.EndHorizontal();
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Başa sar", buttonStyle)) Seek(0f);
-        if (GUILayout.Button("Haritayı sığdır", buttonStyle)) FitCamera();
-        GUILayout.EndHorizontal();
+        GUILayout.BeginArea(new Rect(x + 10, TopBar + PaneHeader + 10, 250, 88), card);
+        GUILayout.Label($"Robot {r}", title);
+        GUILayout.Label(state, text);
+        GUILayout.Label(order, small);
         GUILayout.EndArea();
     }
 
-    private void DrawSidePanel(float w, float h, int step)
+    void DrawBottom(float w, float h)
     {
-        var info = Info;
-        var area = new Rect(w - SideW, TopBar, SideW, h - TopBar - BottomBar);
-        GUI.Box(area, GUIContent.none, panelStyle);
-        GUILayout.BeginArea(new Rect(area.x + 14, area.y + 10, area.width - 28, area.height - 16));
+        float y = h - BottomBar;
+        GUI.Box(new Rect(0, y, w, BottomBar), GUIContent.none, bar);
+        if (GUI.Button(new Rect(14, y + 12, 44, 32), playing ? "❚❚" : "▶", button)) TogglePlay();
 
-        GUILayout.Label(info.title, titleStyle);
-        GUILayout.Label($"{info.about}  <color=#9aa3ad>({info.rate:0.##} sipariş/adım, seed {info.seed})</color>", textStyle);
-        GUILayout.Space(8);
-
-        // dört politikanın tablosu
-        GUILayout.Label("Aynı sipariş akışında, bu adımda:", smallStyle);
-        float measured = step - info.warmup;
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("", smallStyle, GUILayout.Width(36));
-        Header("Tamam.", 52); Header("100 adımda", 74); Header("Ort. süre", 62); Header("Sıkışan", 56);
-        GUILayout.EndHorizontal();
-        for (int p = 0; p < info.series.Length; p++)
+        for (int i = 0; i < Speeds.Length; i++)
         {
-            var s = info.series[p];
-            var style = new GUIStyle(rowStyle);
-            if (p == policy) style.normal.background = rowSelectedTex;
-            GUILayout.BeginHorizontal(style);
-            GUILayout.Label($"<color=#{Hex(PolicyColors[p])}>●</color> <b>{s.policy}</b>", textStyle, GUILayout.Width(36));
-            bool ok = measured > 20;
-            Cell(ok ? s.completed[step].ToString() : "–", 52);
-            Cell(ok ? (100f * s.completed[step] / measured).ToString("0.0") : "–", 74);
-            Cell(ok && s.completed[step] > 0 ? s.meanTime[step].ToString("0") : "–", 62);
-            Cell(s.stuck[step].ToString(), 56);
-            GUILayout.EndHorizontal();
-            Rect row = GUILayoutUtility.GetLastRect();
-            if (Event.current.type == EventType.MouseDown && row.Contains(Event.current.mousePosition) && p != policy)
-            {
-                ShowPolicy(p);
-                Event.current.Use();
-            }
+            bool on = Mathf.Approximately(speed, Speeds[i]);
+            if (GUI.Button(new Rect(66 + i * 44, y + 12, 40, 32), on ? $"<b>{Speeds[i]}×</b>" : $"{Speeds[i]}×", button))
+                speed = Speeds[i];
         }
-        GUILayout.Label("Tamam.: ısınmadan sonra tamamlanan sipariş · Ort. süre: siparişin gelişinden teslimine geçen adım. Satıra tıkla: o politikayı izle.", smallStyle);
-        GUILayout.Space(10);
 
-        // grafik
-        GUILayout.Label($"Tamamlanan sipariş (ısınmadan sonra, en çok {chartMax})", smallStyle);
-        Rect chart = GUILayoutUtility.GetRect(area.width - 28, ChartH / 2f);
-        GUI.DrawTexture(chart, chartTex, ScaleMode.StretchToFill);
-        float cx = chart.x + chart.width * step / LastFrame;
-        GUI.DrawTexture(new Rect(cx - 1, chart.y, 2, chart.height), cursorTex);
-        if (Event.current.type == EventType.MouseDrag || Event.current.type == EventType.MouseDown)
-        {
-            if (chart.Contains(Event.current.mousePosition))
-            {
-                Seek((Event.current.mousePosition.x - chart.x) / chart.width * LastFrame);
-                Event.current.Use();
-            }
-        }
-        string events = info.events.Length > 0 ? $"<color=#{Hex(Closed)}>■</color> olay süresi   " : "";
-        GUILayout.Label($"<color=#{Hex(new Color(0.95f, 0.79f, 0.30f))}>■</color> ısınma   {events}grafiğe tıkla: o ana git", smallStyle);
-        GUILayout.Space(10);
-
-        // lejant
-        GUILayout.Label(
-            Legend("●", Moving, "ürün taşıyor") + Legend("○", Moving, "boş") + "\n"
-            + Legend("●", Stuck, "ilerleyemiyor") + Legend("✕", Failed, "arızalı") + "\n"
-            + Legend("◆", OrderColor, "bekleyen sipariş") + Legend("■", Closed, "kapalı hücre") + "\n"
-            + Legend("■", Shelf, "raf") + Legend("■", Station, "paketleme masası") + Legend("■", ParkMark, "park"),
-            textStyle);
-        GUILayout.EndArea();
-    }
-
-    private void Header(string text, float width) =>
-        GUILayout.Label(text, new GUIStyle(smallStyle) { alignment = TextAnchor.MiddleRight }, GUILayout.Width(width));
-
-    private void Cell(string text, float width) => GUILayout.Label(text, cellStyle, GUILayout.Width(width));
-
-    private void DrawBottomBar(float w, float h)
-    {
-        GUI.Box(new Rect(0, h - BottomBar, w, BottomBar), GUIContent.none, panelStyle);
-        float y0 = h - BottomBar + 9;
-        GUI.Label(new Rect(14, y0, 170, 20), $"Hız: <b>{stepsPerSecond:0.##}</b> adım/sn", textStyle);
-        GUI.DrawTexture(new Rect(150, y0 + 9, 130, 4), trackTex);
-        float logSpeed = GUI.HorizontalSlider(new Rect(150, y0 + 4, 130, 16),
-            Mathf.Log(stepsPerSecond), Mathf.Log(MinSpeed), Mathf.Log(MaxSpeed));
-        stepsPerSecond = Mathf.Exp(logSpeed);
-
-        bool before = showArrows ^ showOrders ^ showHeat;
-        showArrows = GUI.Toggle(new Rect(296, y0, 110, 20), showArrows, " Yön okları");
-        showOrders = GUI.Toggle(new Rect(400, y0, 160, 20), showOrders, " Bekleyen siparişler");
-        showHeat = GUI.Toggle(new Rect(550, y0, 190, 20), showHeat, " Sıkışıklık ısı haritası");
-        if (before != (showArrows ^ showOrders ^ showHeat)) { heatFrame = -1; Apply(); }
-
-        GUI.Label(new Rect(14, y0 + 28, 60, 20), "Zaman", textStyle);
-        var bar = new Rect(70, y0 + 32, w - 84, 16);
-        // zaman çubuğunda ısınma ve olay bölümleri gölgeli
-        GUI.DrawTexture(new Rect(bar.x, bar.y + 3, bar.width, bar.height - 6), trackTex);
-        GUI.DrawTexture(new Rect(bar.x, bar.y + 3, bar.width * run.warmup / LastFrame, bar.height - 6), warmupTex);
+        float bx = 256, bw = w - bx - 250;
+        var slider = new Rect(bx, y + 20, bw, 16);
+        GUI.DrawTexture(new Rect(bx, y + 25, bw, 6), track);
+        GUI.DrawTexture(new Rect(bx, y + 25, bw * Info.warmup / LastFrame, 6), warmTex);
         foreach (var e in Info.events)
-            GUI.DrawTexture(new Rect(bar.x + bar.width * e.start / LastFrame, bar.y + 3,
-                                     bar.width * e.duration / LastFrame, bar.height - 6), eventTex);
-        float newTime = GUI.HorizontalSlider(bar, time, 0f, LastFrame);
-        if (!Mathf.Approximately(newTime, time)) Seek(newTime);
+            GUI.DrawTexture(new Rect(bx + bw * e.start / LastFrame, y + 25, bw * e.duration / LastFrame, 6), eventTex);
+        float t = GUI.HorizontalSlider(slider, time, 0f, LastFrame);
+        if (!Mathf.Approximately(t, time)) Seek(t);
 
-        GUI.Label(new Rect(750, y0, w - 764, 20),
-            "<color=#9aa3ad>tıkla: robot ayrıntısı · tekerlek/sürükle: yakınlaştır/kaydır · boşluk: oynat · 1-4: politika</color>",
-            smallStyle);
+        GUI.Label(new Rect(w - 236, y + 18, 100, 24), $"Adım <b>{Step}</b>", text);
+        bool heat = GUI.Toggle(new Rect(w - 136, y + 18, 130, 24), showHeat, " Isı haritası");
+        if (heat != showHeat) { showHeat = heat; Redraw(); }
     }
 
-    private void DrawCard(ReplayFrame fr)
+    // Ekranı karartır. Kartın dışına tıklanırsa true döner.
+    bool Dim(float w, float h)
     {
-        int r = selected;
-        int phase = fr.phase[r];
-        bool broken = Array.IndexOf(fr.failed, r) >= 0;
-        string state = fr.blocked[r] > 0
-            ? $"<color=#ff6b6b><b>{fr.blocked[r]} adımdır ilerleyemiyor</b></color>"
-            : "ilerliyor";
-        if (phase == 0) state = "parkta bekliyor";
-        if (broken) state = "<color=#c0c4ca><b>arızalı, yerinde duruyor</b></color>";
+        GUI.DrawTexture(new Rect(0, 0, w, h), overlay.normal.background);
+        return GUI.Button(new Rect(0, 0, w, h), GUIContent.none, GUIStyle.none);
+    }
 
-        string task = "görev yok";
-        int oid = fr.order[r];
-        if (oid >= 0)
+    void DrawMenu(float w, float h)
+    {
+        if (Dim(w, h)) { menuOpen = false; return; }
+        GUILayout.BeginArea(new Rect(14, TopBar, 480, 64 * index.scenarios.Length + 20), card);
+        for (int s = 0; s < index.scenarios.Length; s++)
         {
-            var o = run.orders[oid];
-            string drop = phase == 2 ? $"istasyon ({fr.tx[r]}, {fr.ty[r]})"
-                        : run.policyId == "P3" ? "istasyon: ürün alınınca seçilecek"
-                        : $"istasyon ({o.drop.x}, {o.drop.y})";
-            task = $"Sipariş #{o.id} ({o.arrival}. adımda geldi)\nraf ({o.pick.x}, {o.pick.y}) → {drop}";
+            var sc = index.scenarios[s];
+            if (GUILayout.Button($"<b>{sc.title}</b>\n<size=12>{sc.about}</size>", button, GUILayout.Height(56)))
+            {
+                menuOpen = false;
+                ShowScenario(s);
+            }
         }
-        int remaining = 0;
-        if (fr.plan[r] >= 0) remaining = run.plans[fr.plan[r]].xs.Length - fr.planOffset[r];
-
-        GUILayout.BeginArea(CardRect(), cardStyle);
-        GUILayout.Label($"Robot {r}", titleStyle);
-        GUILayout.Space(4);
-        GUILayout.Label($"<b>Ne yapıyor:</b> {PhaseNames[phase]}", textStyle);
-        GUILayout.Label($"<b>Durum:</b> {state}", textStyle);
-        GUILayout.Label($"<b>Görev:</b> {task}", textStyle);
-        GUILayout.Label($"<b>Konum:</b> ({fr.xs[r]}, {fr.ys[r]})   <b>Hedef:</b> ({fr.tx[r]}, {fr.ty[r]})", textStyle);
-        GUILayout.Label($"<b>Kalan rota:</b> {remaining} adım", textStyle);
         GUILayout.EndArea();
     }
 
-    private static string Legend(string symbol, Color c, string label) =>
-        $"<color=#{ColorUtility.ToHtmlStringRGB(c)}>{symbol}</color> {label}   ";
+    void DrawHelp(float w, float h)
+    {
+        if (Dim(w, h)) { helpOpen = false; return; }
+        GUILayout.BeginArea(new Rect(w / 2 - 330, 90, 660, 350), card);
+        GUILayout.Label("Ne görüyorum?", title);
+        GUILayout.Space(6);
+        GUILayout.Label("İki harita aynı siparişleri farklı yöntemlerle karşılar. Haritaların üstündeki oklarla yöntem değişir.", text);
+        GUILayout.Space(8);
+        foreach (var p in index.policies)
+        {
+            GUILayout.Label($"<b>{p.id} · {p.name}</b>: {p.about}", text);
+            GUILayout.Space(3);
+        }
+        GUILayout.Space(10);
+        GUILayout.Label(
+            Dot("●", ReplayPane.Moving, "ürün taşıyan robot") + Dot("○", ReplayPane.Moving, "boş robot")
+            + Dot("●", ReplayPane.Stuck, "ilerleyemeyen robot") + Dot("✕", ReplayPane.Failed, "arızalı robot") + "\n"
+            + Dot("◆", ReplayPane.OrderColor, "kimseye verilmemiş sipariş") + Dot("■", ReplayPane.Closed, "kapalı koridor") + "\n"
+            + Dot("■", ReplayPane.Shelf, "raf") + Dot("■", ReplayPane.Station, "paketleme masası") + Dot("■", ReplayPane.ParkMark, "park yeri"),
+            text);
+        GUILayout.Space(10);
+        GUILayout.Label("İlk 200 adım ısınmadır, sayılara katılmaz. Isı haritası son 100 adımda robotların en çok beklediği yerleri boyar.", text);
+        GUILayout.Space(10);
+        GUILayout.Label("Boşluk: oynat / duraklat · ← →: tek adım · tekerlek: yakınlaştır · sürükle: kaydır · robota tıkla: rotası · H: ısı haritası · Esc: kapat", small);
+        GUILayout.EndArea();
+    }
+
+    static string Dot(string symbol, Color c, string label) => $"<color=#{Hex(c)}>{symbol}</color> {label}     ";
 }
