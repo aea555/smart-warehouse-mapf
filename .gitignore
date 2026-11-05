@@ -12,8 +12,8 @@ wheels/
 # macOS
 .DS_Store
 
-# Deney ciktilari
-results/
+# Deney ciktilari: CSV'ler repoda, buyuk ara veri degil
+results/*.npz
 
 # Test/arac cachei
 .pytest_cache/
