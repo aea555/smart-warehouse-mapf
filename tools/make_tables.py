@@ -71,37 +71,30 @@ def write(name: str, body: str) -> None:
 
 # ana sonuçlar
 
-POINTS = [("low", 30, 0.6), ("medium", 30, 0.6), ("high", 30, 0.6),
-          ("low", 30, 0.8), ("medium", 30, 0.8), ("high", 30, 0.8),
-          ("movingai", 100, 0.8), ("movingai", 100, 1.2)]
+POINTS = [("low", 30, 0.8), ("medium", 30, 0.6), ("medium", 30, 0.8), ("high", 30, 0.8),
+          ("movingai", 100, 1.2)]
 LAYOUT = {"low": "Düşük", "medium": "Orta", "high": "Yüksek", "movingai": "MovingAI"}
 
 
-def main_tables(final):
-    """Throughput, teslim süresi ve kilitlenme oranı için ayrı tablolar yazar."""
+def main_table(final):
+    """Tablodaki her hücreye throughput ortalaması ± standart sapma / ortalama teslim süresi yazılır."""
     g = group(final, "layout", "robots", "rate", "policy")
-    head = " & ".join(f"{LAYOUT[l]} {num(r)}" for l, _, r in POINTS)
-    for metric, name, d in (("throughput", "main_throughput", 1), ("mean_completion_time", "main_time", 0)):
-        lines = []
-        for p in POLICIES:
-            cells = [ms(col(g[(l, str(n), str(r), p)], metric), d) for l, n, r in POINTS]
-            lines.append(f"{NAMES[p]} & " + " & ".join(cells) + r" \\")
-        write(name, "\\begin{tabular}{l" + "c" * len(POINTS) + "}\n\\toprule\n"
-              f"Yöntem & {head} \\\\\n\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}\n")
-
-    # kilitlenme oranı, sadece P0'da sıfırdan farklı
+    head = " & ".join(f"{LAYOUT[l]}, {n} robot, {num(r)}" for l, n, r in POINTS)
     lines = []
     for p in POLICIES:
-        cells = [num(100 * st.mean(col(g[(l, str(n), str(r), p)], "deadlocked")), 0) for l, n, r in POINTS]
+        cells = []
+        for l, n, r in POINTS:
+            rows = g[(l, str(n), str(r), p)]
+            cells.append(f"{ms(col(rows, 'throughput'))} / {num(st.mean(col(rows, 'mean_completion_time')), 0)}")
         lines.append(f"{NAMES[p]} & " + " & ".join(cells) + r" \\")
-    write("main_deadlock", "\\begin{tabular}{l" + "c" * len(POINTS) + "}\n\\toprule\n"
+    write("main", "\\begin{tabular}{l" + "c" * len(POINTS) + "}\n\\toprule\n"
           f"Yöntem & {head} \\\\\n\\midrule\n" + "\n".join(lines) + "\n\\bottomrule\n\\end{tabular}\n")
 
 
 def pairwise(final):
     g = group(final, "layout", "robots", "rate", "policy")
     pairs = [("P1", "P0"), ("P2", "P1"), ("P3", "P2"), ("P3", "P3-rule")]
-    points = [("medium", 30, 0.8), ("high", 30, 0.8), ("movingai", 100, 1.2)]
+    points = [("medium", 30, 0.8), ("movingai", 100, 1.2)]
     lines = []
     for l, n, r in points:
         for a, b in pairs:
@@ -192,7 +185,7 @@ def agitation_numbers(exp):
 
 def main() -> None:
     final = load("final.csv")
-    main_tables(final)
+    main_table(final)
     pairwise(final)
     rq2_table(load("rq2.csv"))
     sensitivity_table(load("sensitivity.csv"))
